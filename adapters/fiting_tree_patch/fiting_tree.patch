@@ -1,0 +1,20 @@
+diff --git a/src/piecewise_linear_model.h b/src/piecewise_linear_model.h
+--- a/src/piecewise_linear_model.h
++++ b/src/piecewise_linear_model.h
+@@ -1,6 +1,12 @@
+ // Minimal adapter patch for FITing-Tree.
+-// The slope-range logic in FITing-Tree's PiecewiseLinearModel is essentially
+-// SwingFilter with pivot=first point.  This patch adds a compile-time hook
+-// so pla-learned-index-bench can substitute its own SwingFilter or GreedyPLA.
++// FITing-Tree's PiecewiseLinearModel already implements SwingFilter
++// (pivot = first key of segment, slope bounds = lower_slope/upper_slope).
++// This patch is informational only — pla-learned-index-bench uses
++// FITing-Tree's logic as a reference, not a runtime replacement.
++//
++// Key equivalences:
++//   FITing-Tree lower_slope  ↔  pla::detail::slope_lo
++//   FITing-Tree upper_slope  ↔  pla::detail::slope_hi
++//   FITing-Tree get_segment() ↔  midpoint slope = (slope_lo+slope_hi)/2
++//
++// No source changes needed for FITing-Tree baseline benchmarks.
++// To replace PLA inside FITing-Tree, follow the same pattern as pgm_index.patch.

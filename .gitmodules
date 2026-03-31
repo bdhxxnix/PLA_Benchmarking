@@ -1,0 +1,24 @@
+[submodule "third_party/PGM-index"]
+    path = third_party/PGM-index
+    url = https://github.com/gvinciguerra/PGM-index.git
+    branch = master
+
+[submodule "third_party/FITing-Tree"]
+    path = third_party/FITing-Tree
+    url = https://github.com/efficient/FITing-Tree.git
+    branch = master
+
+[submodule "third_party/LOFT"]
+    path = third_party/LOFT
+    url = https://github.com/LoftyElvis/LOFT.git
+    branch = main
+
+[submodule "third_party/Efficient-Disk-Learned-Index"]
+    path = third_party/Efficient-Disk-Learned-Index
+    url = https://github.com/stoianmihail/Efficient-Disk-Learned-Index.git
+    branch = main
+
+[submodule "third_party/SOSD"]
+    path = third_party/SOSD
+    url = https://github.com/learnedsystems/SOSD.git
+    branch = master

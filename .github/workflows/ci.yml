@@ -1,0 +1,150 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  # ── IM-A: pla_only + inmem (PGM-index) ──────────────────────────────────────
+  smoke-inmem:
+    name: Smoke — pla_only + inmem
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y build-essential cmake libomp-dev python3 python3-pip
+          pip3 install --quiet pyyaml matplotlib numpy
+
+      - name: Apply patches
+        run: bash scripts/apply_patches.sh
+
+      - name: CMake configure (optimal)
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DPLA_ALGO=optimal \
+            -DBUILD_TESTS=ON \
+            -DBUILD_DYNAMIC=OFF \
+            -DBUILD_ONDISK=OFF
+
+      - name: Build
+        run: cmake --build build -j$(nproc)
+
+      - name: Unit tests (optimal)
+        run: cd build && ctest --output-on-failure
+
+      - name: CMake configure (swing)
+        run: |
+          cmake -S . -B build \
+            -DPLA_ALGO=swing \
+            -DBUILD_TESTS=ON \
+            -DBUILD_DYNAMIC=OFF \
+            -DBUILD_ONDISK=OFF
+
+      - name: Build (swing)
+        run: cmake --build build -j$(nproc)
+
+      - name: Unit tests (swing)
+        run: cd build && ctest --output-on-failure
+
+      - name: CMake configure (greedy)
+        run: |
+          cmake -S . -B build \
+            -DPLA_ALGO=greedy \
+            -DBUILD_TESTS=ON \
+            -DBUILD_DYNAMIC=OFF \
+            -DBUILD_ONDISK=OFF
+
+      - name: Build (greedy)
+        run: cmake --build build -j$(nproc)
+
+      - name: Unit tests (greedy)
+        run: cd build && ctest --output-on-failure
+
+      - name: Smoke run (pla_only + inmem, tiny data)
+        run: |
+          python3 tools/runner/run.py \
+            --config configs/exp_example.yaml \
+            --smoke \
+            --filter-scenario pla_only \
+            --no-build
+          python3 tools/runner/run.py \
+            --config configs/exp_example.yaml \
+            --smoke \
+            --filter-scenario inmem \
+            --no-build
+
+      - name: Check JSONL output
+        run: |
+          ls -lh results/raw/ || true
+          for f in results/raw/*.jsonl; do
+            echo "=== $f ==="; head -5 "$f" || true
+          done
+
+      - name: Aggregate + plots
+        run: |
+          python3 tools/viz/aggregate.py \
+            --input  results/raw \
+            --output results/agg
+          python3 tools/viz/plots.py \
+            --input  results/agg/results.csv \
+            --output results/agg
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: smoke-results
+          path: results/
+
+  # ── DW-A: dynamic (LOFT) — compile only if MKL unavailable ─────────────────
+  smoke-dynamic:
+    name: Smoke — dynamic (LOFT compile-only)
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y build-essential cmake libomp-dev \
+            libjemalloc-dev liburcu-dev
+
+      - name: Apply patches
+        run: bash scripts/apply_patches.sh
+
+      - name: CMake configure (dynamic, no MKL)
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DPLA_ALGO=optimal \
+            -DBUILD_TESTS=OFF \
+            -DBUILD_DYNAMIC=ON \
+            -DBUILD_ONDISK=OFF \
+            -DUSE_MKL=OFF \
+            -DUSE_JEMALLOC=ON \
+            -DUSE_URCU=ON
+
+      - name: Build (dynamic)
+        run: cmake --build build -j$(nproc) --target dynamic_bench
+
+      - name: Note
+        # MKL not available in GitHub Actions standard runners;
+        # LOFT microbench requires MKL at runtime → compile-only validation.
+        run: |
+          echo "dynamic_bench compiled successfully."
+          echo "Full LOFT runtime test requires MKL (not available in CI)."
+          echo "To run locally: cmake -DUSE_MKL=ON ... && ./build/dynamic_bench"

@@ -1,0 +1,24 @@
+diff --git a/piecewise_linear_model.hpp b/piecewise_linear_model.hpp
+--- a/piecewise_linear_model.hpp
++++ b/piecewise_linear_model.hpp
+@@ -1,5 +1,16 @@
+ // Minimal adapter patch for LOFT.
+-// LOFT uses its own copy of piecewise_linear_model.hpp (same as PGM-index).
+-// Swap the make_segmentation call here to inject Swing/Greedy.
++//
++// LOFT's piecewise_linear_model.hpp is a copy of PGM-index internals.
++// The injection point is the same: replace make_segmentation(_par) with
++// pla::detail::build_swing / build_greedy as needed.
++
++#if defined(PLA_ALGO_SWING) || defined(PLA_ALGO_GREEDY)
++#  include <pla/pla_api.h>
++#endif
+
+-        pgm::internal::make_segmentation(begin, end, epsilon, out_fun);
++#if defined(PLA_ALGO_SWING)
++        { auto _r = pla::detail::build_swing(&*begin, end-begin, epsilon, {}); /* use _r.segments */ }
++#elif defined(PLA_ALGO_GREEDY)
++        { auto _r = pla::detail::build_greedy(&*begin, end-begin, epsilon, {}); /* use _r.segments */ }
++#else
++        pgm::internal::make_segmentation(begin, end, epsilon, out_fun);
++#endif

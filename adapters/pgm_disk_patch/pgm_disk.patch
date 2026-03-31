@@ -1,0 +1,28 @@
+diff --git a/indexes/PGM-index-disk/piecewise_linear_model.hpp b/indexes/PGM-index-disk/piecewise_linear_model.hpp
+--- a/indexes/PGM-index-disk/piecewise_linear_model.hpp
++++ b/indexes/PGM-index-disk/piecewise_linear_model.hpp
+@@ -1,5 +1,16 @@
+ // Minimal adapter patch for Efficient-Disk-Learned-Index (PGM-disk).
+-// Replaces make_segmentation(_par) in the on-disk PGM build with the
+-// selected pla-learned-index-bench algorithm.
++//
++// Efficient-Disk-Learned-Index embeds its own copy of PGM-index-disk
++// in indexes/PGM-index-disk/.  The injection point mirrors pgm_index.patch.
++//
++// Additionally, pgm_index_page.hpp builds a two-level structure:
++//   Level 1: sparse_data (sampled keys) → PGMIndexPage on those
++//   Level 2: full keys within each page
++// Both levels call make_segmentation; patch both if needed.
+
++#if defined(PLA_ALGO_SWING) || defined(PLA_ALGO_GREEDY)
++#  include <pla/pla_api.h>
++#endif
+
+-        pgm::internal::make_segmentation_par(begin, end, epsilon, nthreads, out_fun);
++#if defined(PLA_ALGO_SWING)
++        { auto _r = pla::detail::build_swing(&*begin, end-begin, epsilon, {}); /* use _r */ }
++#elif defined(PLA_ALGO_GREEDY)
++        { auto _r = pla::detail::build_greedy(&*begin, end-begin, epsilon, {}); /* use _r */ }
++#else
++        pgm::internal::make_segmentation_par(begin, end, epsilon, nthreads, out_fun);
++#endif

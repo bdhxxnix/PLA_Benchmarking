@@ -1,0 +1,13 @@
+build/
+*.o
+*.a
+*.so
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+results/raw/*.jsonl
+results/agg/*.csv
+results/agg/*.png
+results/agg/metadata.json
+data/

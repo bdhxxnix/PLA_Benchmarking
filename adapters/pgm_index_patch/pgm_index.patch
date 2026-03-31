@@ -1,0 +1,46 @@
+diff --git a/include/pgm/pgm_index.hpp b/include/pgm/pgm_index.hpp
+--- a/include/pgm/pgm_index.hpp
++++ b/include/pgm/pgm_index.hpp
+@@ -1,6 +1,13 @@
+ // This is a MINIMAL adapter patch.  It wraps the PLA construction
+ // call so that pla-learned-index-bench can inject Swing/Greedy.
++// Apply with: patch -p1 < adapters/pgm_index_patch/pgm_index.patch
++//
++// If PLA_ALGO_SWING or PLA_ALGO_GREEDY is defined at compile time,
++// we replace make_segmentation_par with the selected algorithm.
++// Otherwise (default) the original PGM OptimalPLA is used unchanged.
++
++#if defined(PLA_ALGO_SWING) || defined(PLA_ALGO_GREEDY)
++#  include <pla/pla_api.h>
++#endif
+
+ // ---- Original PGM build_level excerpt ----
+-        auto out_fun = [&](auto cs) {
+-            segments.emplace_back(cs.get_first_x(), cs.get_slope_and_intercept());
+-        };
+-        pgm::internal::make_segmentation_par(begin, end, epsilon_value, segments.size(), out_fun);
++        // pla-learned-index-bench injection point:
++#if defined(PLA_ALGO_SWING)
++        {
++            pla::PlaOptions _opts; _opts.threads = parallelism;
++            auto _res = pla::detail::build_swing(begin, end - begin, epsilon_value, _opts);
++            for (auto& s : _res.segments)
++                segments.emplace_back(static_cast<K>(s.key_lo),
++                    std::make_pair(static_cast<float>(s.slope),
++                                   static_cast<int32_t>(s.intercept)));
++        }
++#elif defined(PLA_ALGO_GREEDY)
++        {
++            pla::PlaOptions _opts; _opts.threads = parallelism;
++            auto _res = pla::detail::build_greedy(begin, end - begin, epsilon_value, _opts);
++            for (auto& s : _res.segments)
++                segments.emplace_back(static_cast<K>(s.key_lo),
++                    std::make_pair(static_cast<float>(s.slope),
++                                   static_cast<int32_t>(s.intercept)));
++        }
++#else
++        auto out_fun = [&](auto cs) {
++            segments.emplace_back(cs.get_first_x(), cs.get_slope_and_intercept());
++        };
++        pgm::internal::make_segmentation_par(begin, end, epsilon_value, segments.size(), out_fun);
++#endif

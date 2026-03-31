@@ -1,0 +1,31 @@
+exp_name: demo
+
+# 实验矩阵：笛卡尔积展开为各实验用例
+matrix:
+  scenario:       [pla_only, inmem, dynamic, ondisk]
+  pla:            [optimal, swing, greedy]
+  epsilon:        [32, 64, 128]
+  threads:        [1, 4, 16]
+  dataset:        [synth_uniform_1M, synth_lognormal_1M]
+  workload:       [readonly, balanced]
+  fetch_strategy: [0, 1, 2, 3]   # 仅 ondisk 场景生效；其他场景写入 fetch_strategy=-1
+
+# 合成数据集默认规模（runner 传 --n 参数）
+n_keys:  1000000
+queries: 1000000
+
+# 额外的 benchmark 标志（透传给 bench 二进制）
+extra_flags: {}
+
+# 以下是较大规模的完整实验矩阵示例（注释掉的版本）：
+# matrix:
+#   scenario:       [pla_only, inmem, dynamic, ondisk]
+#   pla:            [optimal, swing, greedy]
+#   epsilon:        [8, 16, 32, 64, 128, 256]
+#   threads:        [1, 2, 4, 8, 16]
+#   dataset:        [sosd_fb_200M, sosd_books_800M, synth_lognormal_200M,
+#                    synth_uniform_200M, synth_zipf_200M]
+#   workload:       [readonly, balanced, zipf]
+#   fetch_strategy: [0, 1, 2, 3]
+# n_keys:  200000000
+# queries: 10000000

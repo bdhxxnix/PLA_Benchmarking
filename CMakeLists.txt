@@ -63,7 +63,7 @@ endif()
 
 # ─── Third-party include paths ───────────────────────────────────────────────
 set(PGM_INCLUDE    "${CMAKE_SOURCE_DIR}/third_party/PGM-index/include")
-set(FITING_INCLUDE "${CMAKE_SOURCE_DIR}/third_party/FITing-Tree/src")
+set(FITING_INCLUDE "${CMAKE_SOURCE_DIR}/third_party/FITing-Tree/include")
 set(LOFT_INCLUDE   "${CMAKE_SOURCE_DIR}/third_party/LOFT")
 set(EDLI_ROOT      "${CMAKE_SOURCE_DIR}/third_party/Efficient-Disk-Learned-Index")
 set(SOSD_INCLUDE   "${CMAKE_SOURCE_DIR}/third_party/SOSD")
@@ -115,7 +115,7 @@ endif()
 if(BUILD_ONDISK)
   if(EXISTS "${EDLI_ROOT}/CMakeLists.txt")
     # Pull in EDLI's include dirs without recursively adding its full build
-    set(EDLI_INCLUDE "${EDLI_ROOT}/include")
+    set(EDLI_INCLUDE "${EDLI_ROOT}")
     set(EDLI_PGM_DISK_INCLUDE "${EDLI_ROOT}/indexes/PGM-index-disk")
 
     add_executable(ondisk_bench bench/ondisk/ondisk_bench.cpp)

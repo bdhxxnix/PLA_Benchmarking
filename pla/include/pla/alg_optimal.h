@@ -104,30 +104,36 @@ inline PlaResult build_optimal(
 
     // Collect canonical segments from PGM internals.
     using K = uint64_t;
-    using PGMSeg = pgm::internal::OptimalPiecewiseLinearModel<K, size_t>;
+    using PGMModel = pgm::internal::OptimalPiecewiseLinearModel<K, size_t>;
+    using CanonSeg = typename PGMModel::CanonicalSegment;
 
-    std::vector<pgm::internal::canonical_segment<K,size_t>> raw_segs;
-    raw_segs.reserve(n / (epsilon * 2) + 2);
+    size_t dedup_n = dedup_keys.size() - 1; // exclude sentinel
+    auto in_fn = [&](size_t i) -> K { return dedup_keys[i]; };
 
-    auto out_fn = [&](auto cs){ raw_segs.push_back(cs); };
+    std::vector<CanonSeg> raw_segs;
+    raw_segs.reserve(dedup_n / (epsilon * 2) + 2);
+
+    auto out_fn = [&](const CanonSeg& cs){ raw_segs.push_back(cs); };
 
     if (opts.threads > 1) {
 #ifdef _OPENMP
         pgm::internal::make_segmentation_par(
-            dedup_keys.begin(), dedup_keys.end() - 1, // exclude sentinel
+            dedup_n,
             static_cast<size_t>(epsilon),
-            opts.threads,
+            in_fn,
             out_fn);
 #else
         pgm::internal::make_segmentation(
-            dedup_keys.begin(), dedup_keys.end() - 1,
+            dedup_n,
             static_cast<size_t>(epsilon),
+            in_fn,
             out_fn);
 #endif
     } else {
         pgm::internal::make_segmentation(
-            dedup_keys.begin(), dedup_keys.end() - 1,
+            dedup_n,
             static_cast<size_t>(epsilon),
+            in_fn,
             out_fn);
     }
 

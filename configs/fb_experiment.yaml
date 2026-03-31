@@ -1,0 +1,13 @@
+exp_name: fb_200M
+
+matrix:
+  scenario:       [pla_only, inmem]
+  pla:            [optimal, swing, greedy]
+  epsilon:        [32, 64, 128]
+  threads:        [1]
+  dataset:        [sosd_fb_200M]
+  workload:       [readonly, balanced]
+  fetch_strategy: [0]   # unused for non-ondisk scenarios; written as -1 in output
+
+n_keys:  199999999
+queries: 1000000

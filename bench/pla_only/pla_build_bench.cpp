@@ -88,6 +88,7 @@ int main(int argc, char** argv) {
     std::vector<uint64_t> keys;
     if (!dataset.empty()) {
         keys = load_binary(dataset);
+        std::sort(keys.begin(), keys.end());
     } else if (dist_s == "lognormal") {
         keys = gen_lognormal(n_synth);
     } else {

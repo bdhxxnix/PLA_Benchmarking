@@ -30,8 +30,11 @@ option(BUILD_DYNAMIC "Build LOFT dynamic benchmark"                             
 # ─── Compiler flags ───────────────────────────────────────────────────────────
 add_compile_options(
   -Wall -Wextra -Wno-unused-parameter
-  $<$<CONFIG:Release>:-O3 -march=native -DNDEBUG>
-  $<$<CONFIG:Debug>:-O0 -g>
+  $<$<CONFIG:Release>:-O3>
+  $<$<CONFIG:Release>:-march=native>
+  $<$<CONFIG:Release>:-DNDEBUG>
+  $<$<CONFIG:Debug>:-O0>
+  $<$<CONFIG:Debug>:-g>
 )
 
 # ─── Threading ───────────────────────────────────────────────────────────────

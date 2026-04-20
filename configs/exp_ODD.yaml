@@ -1,0 +1,27 @@
+exp_name: exp_ODD
+# OD-D: G2 prediction granularity × PLA interaction
+# Goal: does switching from item-level to page-level prediction change the
+#        relative advantage of different PLA algorithms?
+#
+# Hypothesis: page-level granularity uses coarser epsilon units (1 page =
+# 512 items for 4 KiB pages + 8-byte keys).  Different PLA algorithms may
+# produce different error distributions at page granularity.
+#
+# Metrics: ops_s, io_pages_mean, seg_cnt, bytes_index for item vs page.
+# Cross-compare at same epsilon value to isolate granularity effect.
+
+matrix:
+  scenario:       [ondisk]
+  pla:            [optimal, swing, greedy]
+  epsilon:        [1, 4, 8, 32, 128]
+  threads:        [1]
+  dataset:        [synth_uniform_1M, synth_lognormal_1M]
+  workload:       [readonly]
+  fetch_strategy: [1]
+  granularity:    [item, page]
+  page_align:     [false]
+
+n_keys:  1000000
+queries: 100000
+
+extra_flags: {}

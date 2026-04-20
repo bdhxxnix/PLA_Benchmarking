@@ -1,0 +1,32 @@
+exp_name: exp_IMB
+# IM-B: End-to-end iso-ε in-memory lookup
+# Goal: at the same ε, does swapping the PLA method change lookup performance?
+#       And does the routing layer (PGM-index recursive vs FITing-Tree flat)
+#       interact with PLA choice?
+#
+# 6 index variants:
+#   PGM-index  × {optimal, swing, greedy}
+#   FITing-Tree × {optimal, swing, greedy}
+#
+# Controlled variable: last-mile search always std::lower_bound (binary search).
+# Metrics: build_ms, seg_cnt, ops_s, p50/p95/p99_ns, cache_misses, instructions.
+#
+# Key observations to look for:
+#   - Fewer segments (optimal) does NOT always mean faster lookup (cache effects)
+#   - PGM-index routing benefit scales with segment count (more segments → bigger gain)
+#   - Swing/Greedy higher avg-error may increase binary search range size
+
+matrix:
+  scenario:       [inmem]
+  pla:            [optimal, swing, greedy]
+  epsilon:        [8, 32, 64, 128, 256, 1024]
+  threads:        [1, 4, 16]
+  dataset:        [synth_uniform_1M, synth_lognormal_1M]
+  workload:       [readonly, balanced, zipf]
+  fetch_strategy: [-1]
+  index:          [pgm-index, fiting-tree]
+
+n_keys:  1000000
+queries: 1000000
+
+extra_flags: {}

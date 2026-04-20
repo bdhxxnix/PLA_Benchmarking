@@ -1,0 +1,28 @@
+exp_name: exp_ODE
+# OD-E: G3 page-alignment × PLA interaction
+# Goal: is the benefit of page-aligned error bounds (G3) uniform across
+#        PLA algorithms, or does it depend on how segments are distributed?
+#
+# Hypothesis: G3 extends the search range to page boundaries.  If a PLA
+# algorithm produces many short segments clustered near page boundaries,
+# G3 provides bigger gains.  OptimalPLA tends to produce fewer, longer
+# segments; Swing/Greedy may have different boundary alignment.
+#
+# Analysis: fix target_rp, compare (model size, throughput) with G3 ON vs OFF.
+# For each PLA, report: seg_cnt (at same Rp), io_pages_mean, ops_s.
+
+matrix:
+  scenario:       [ondisk]
+  pla:            [optimal, swing, greedy]
+  epsilon:        [32, 128, 512]
+  threads:        [1]
+  dataset:        [synth_uniform_1M, synth_lognormal_1M]
+  workload:       [readonly]
+  fetch_strategy: [1]
+  granularity:    [item]
+  page_align:     [false, true]
+
+n_keys:  1000000
+queries: 100000
+
+extra_flags: {}

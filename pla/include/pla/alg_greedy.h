@@ -60,11 +60,14 @@ inline PlaResult build_greedy(
         s.key_hi    = (next_key_lo == 0)
                         ? std::numeric_limits<uint64_t>::max()
                         : next_key_lo - 1;
-        s.slope     = std::isfinite(slope_lo) && std::isfinite(slope_hi)
+        double mid_slope = std::isfinite(slope_lo) && std::isfinite(slope_hi)
                         ? (slope_lo + slope_hi) / 2.0
                         : 0.0;
-        // intercept w.r.t. key_lo of segment: pred(xi) = slope*(xi-x0)+y0
-        s.intercept = y0;
+        s.slope     = mid_slope;
+        // intercept such that slope*(x - key_lo) + intercept = predicted rank
+        // = slope*(x - pivot_x) + pivot_y evaluated at x=key_lo gives the
+        // intercept: slope*(x0 - pivot_x) + pivot_y
+        s.intercept = mid_slope * (static_cast<double>(x0) - pivot_x) + pivot_y;
         s.rank_lo   = seg_start_rank;
         s.rank_hi   = last_rank;
         result.segments.push_back(s);

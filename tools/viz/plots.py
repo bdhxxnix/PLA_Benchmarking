@@ -215,6 +215,229 @@ def plot_ondisk_fetch(rows: List[Dict], out_dir: Path):
     print(f"[plot] {out}")
 
 
+# ── Plot 7: Routing comparison (pgm-index vs fiting-tree) ────────────────────
+def plot_routing_comparison(rows: List[Dict], out_dir: Path):
+    """IM-B: compare ops_s and p99 across routing modes per PLA algorithm."""
+    inmem = [r for r in rows if r["scenario"] == "inmem" and r.get("routing")]
+    if not inmem:
+        return
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    for ax, metric, label in zip(axes,
+                                  ["ops_s", "p99_ns"],
+                                  ["Throughput (ops/s)", "p99 Latency (ns)"]):
+        for pla, prows in group_by(inmem, "pla").items():
+            for routing, rrows in group_by(prows, "routing").items():
+                pts = sorted((r["epsilon"], r[metric]) for r in rrows
+                             if r[metric] > 0 and r["threads"] == 1.0)
+                if pts:
+                    xs, ys = zip(*pts)
+                    ls = "--" if "pgm" in str(routing) else "-"
+                    ax.plot(xs, ys, linestyle=ls, marker="o",
+                            label=f"{pla}/{routing}", color=pla_color(pla))
+        ax.set_title(f"IM-B: Routing × PLA  ({label})")
+        ax.set_xlabel("ε (epsilon)")
+        ax.set_ylabel(label)
+        ax.legend(fontsize=7)
+        ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    out = out_dir / "routing_comparison.png"
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+    print(f"[plot] {out}")
+
+
+# ── Plot 8: Segment length distribution (box approximation) ──────────────────
+def plot_seg_len_distribution(rows: List[Dict], out_dir: Path):
+    """IM-A: seg_len_mean and seg_len_p95 vs epsilon per PLA."""
+    pla_only = [r for r in rows
+                if r["scenario"] == "pla_only" and r.get("seg_len_mean", 0)]
+    if not pla_only:
+        return
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    for ax, metric, label in zip(axes,
+                                  ["seg_len_mean", "seg_len_p95"],
+                                  ["Mean key span", "p95 key span"]):
+        for pla, prows in group_by(pla_only, "pla").items():
+            pts = sorted((r["epsilon"], float(r.get(metric, 0)))
+                         for r in prows
+                         if float(r.get(metric, 0)) > 0
+                         and r.get("threads") == 1.0)
+            if pts:
+                xs, ys = zip(*pts)
+                ax.plot(xs, ys, marker="o", label=pla, color=pla_color(pla))
+        ax.set_title(f"IM-A: ε vs {label}")
+        ax.set_xlabel("ε (epsilon)")
+        ax.set_ylabel(label)
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    out = out_dir / "seg_len_distribution.png"
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+    print(f"[plot] {out}")
+
+
+# ── Plot 9: Parallel build overhead (threads vs seg_cnt relative to 1T) ──────
+def plot_parallel_build_overhead(rows: List[Dict], out_dir: Path):
+    """IM-A: shows extra segments produced by parallel build as thread count rises."""
+    pla_only = [r for r in rows if r["scenario"] == "pla_only"]
+    if not pla_only:
+        return
+
+    # Find baseline (threads=1) seg_cnt per (pla, epsilon, dataset).
+    baseline: Dict = {}
+    for r in pla_only:
+        if r["threads"] == 1.0 and r["seg_cnt"] > 0:
+            key = (r["pla"], r["epsilon"], r.get("dataset", ""))
+            baseline[key] = r["seg_cnt"]
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    seen_any = False
+    for pla, prows in group_by(pla_only, "pla").items():
+        pts = []
+        for r in prows:
+            if r["threads"] <= 1.0 or r["seg_cnt"] <= 0:
+                continue
+            bk = (r["pla"], r["epsilon"], r.get("dataset", ""))
+            base = baseline.get(bk, 0)
+            if base > 0:
+                overhead = (r["seg_cnt"] - base) / base * 100.0
+                pts.append((r["threads"], overhead))
+        if pts:
+            pts_sorted = sorted(pts)
+            xs, ys = zip(*pts_sorted)
+            ax.plot(xs, ys, marker="^", label=pla, color=pla_color(pla))
+            seen_any = True
+    if not seen_any:
+        ax.text(0.5, 0.5, "No multi-thread pla_only data",
+                ha="center", transform=ax.transAxes)
+    ax.set_title("IM-A: Parallel Build Overhead (extra segments %)")
+    ax.set_xlabel("Threads")
+    ax.set_ylabel("Extra segments vs 1-thread (%)")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    out = out_dir / "parallel_build_overhead.png"
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+    print(f"[plot] {out}")
+
+
+# ── Plot 10: Retrain impact (DW-A/B) ─────────────────────────────────────────
+def plot_retrain_impact(rows: List[Dict], out_dir: Path):
+    """DW-A/B: retrain_ms and p99 latency vs epsilon and workload."""
+    dynamic = [r for r in rows if r["scenario"] == "dynamic" and r["build_ms"] > 0]
+    if not dynamic:
+        return
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    # Left: retrain total time vs epsilon
+    ax = axes[0]
+    for pla, prows in group_by(dynamic, "pla").items():
+        pts = sorted((r["epsilon"], r.get("retrain_ms", 0))
+                     for r in prows if r.get("retrain_ms", 0) > 0)
+        if pts:
+            xs, ys = zip(*pts)
+            ax.plot(xs, ys, marker="s", label=pla, color=pla_color(pla))
+    ax.set_title("DW-A/B: ε vs Total Retrain Time")
+    ax.set_xlabel("ε (epsilon)")
+    ax.set_ylabel("retrain_ms (cumulative)")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    # Right: p99 lookup latency vs epsilon, coloured by workload
+    ax = axes[1]
+    for pla, prows in group_by(dynamic, "pla").items():
+        pts = sorted((r["epsilon"], r["p99_ns"])
+                     for r in prows if r["p99_ns"] > 0)
+        if pts:
+            xs, ys = zip(*pts)
+            ax.plot(xs, ys, marker="D", label=pla, color=pla_color(pla))
+    ax.set_title("DW-B: ε vs p99 Lookup Latency")
+    ax.set_xlabel("ε (epsilon)")
+    ax.set_ylabel("p99 latency (ns)")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    out = out_dir / "retrain_impact.png"
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+    print(f"[plot] {out}")
+
+
+# ── Plot 11: On-disk Rp (pages/query) vs epsilon ─────────────────────────────
+def plot_ondisk_rp(rows: List[Dict], out_dir: Path):
+    """OD-A/B: io_pages_mean (Rp) vs epsilon per PLA."""
+    ondisk = [r for r in rows
+              if r["scenario"] == "ondisk" and r.get("io_pages_mean", 0)]
+    if not ondisk:
+        return
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    for ax, metric, label in zip(axes,
+                                  ["io_pages_mean", "ops_s"],
+                                  ["Mean pages/query (Rp)", "Throughput (ops/s)"]):
+        for pla, prows in group_by(ondisk, "pla").items():
+            pts = sorted((r["epsilon"], float(r.get(metric, 0)))
+                         for r in prows if float(r.get(metric, 0)) > 0
+                         and r.get("granularity", "item") == "item"
+                         and not str(r.get("page_align", "false")).lower() in ("true", "1"))
+            if pts:
+                xs, ys = zip(*pts)
+                ax.plot(xs, ys, marker="o", label=pla, color=pla_color(pla))
+        ax.set_title(f"OD-A/B: ε vs {label}")
+        ax.set_xlabel("ε (epsilon)")
+        ax.set_ylabel(label)
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    out = out_dir / "ondisk_rp.png"
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+    print(f"[plot] {out}")
+
+
+# ── Plot 12: G3 page-align benefit (OD-E) ────────────────────────────────────
+def plot_page_align_benefit(rows: List[Dict], out_dir: Path):
+    """OD-E: compare io_pages_mean and ops_s with page-align ON vs OFF."""
+    ondisk = [r for r in rows
+              if r["scenario"] == "ondisk" and r.get("page_align") is not None]
+    if not ondisk:
+        return
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    for ax, metric, label in zip(axes,
+                                  ["io_pages_mean", "ops_s"],
+                                  ["Mean pages/query", "Throughput (ops/s)"]):
+        for pla, prows in group_by(ondisk, "pla").items():
+            for align in [False, True]:
+                align_str = "true" if align else "false"
+                arows = [r for r in prows
+                         if str(r.get("page_align", "false")).lower() in
+                            (("true", "1") if align else ("false", "0", ""))]
+                pts = sorted((r["epsilon"], float(r.get(metric, 0)))
+                             for r in arows if float(r.get(metric, 0)) > 0)
+                if pts:
+                    xs, ys = zip(*pts)
+                    ls = "-" if not align else "--"
+                    lbl = f"{pla}/{'aligned' if align else 'raw'}"
+                    ax.plot(xs, ys, linestyle=ls, marker="s",
+                            label=lbl, color=pla_color(pla))
+        ax.set_title(f"OD-E: G3 Page-Align Effect ({label})")
+        ax.set_xlabel("ε (epsilon)")
+        ax.set_ylabel(label)
+        ax.legend(fontsize=7)
+        ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    out = out_dir / "page_align_benefit.png"
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+    print(f"[plot] {out}")
+
+
 # ── main ──────────────────────────────────────────────────────────────────────
 def main():
     ap = argparse.ArgumentParser(description="Generate benchmark plots")
@@ -243,6 +466,13 @@ def main():
     plot_latency_cdf(rows, out_dir)
     plot_cache_miss_rate(rows, out_dir)
     plot_ondisk_fetch(rows, out_dir)
+    # Additional plots for new experiments
+    plot_routing_comparison(rows, out_dir)
+    plot_seg_len_distribution(rows, out_dir)
+    plot_parallel_build_overhead(rows, out_dir)
+    plot_retrain_impact(rows, out_dir)
+    plot_ondisk_rp(rows, out_dir)
+    plot_page_align_benefit(rows, out_dir)
 
     print(f"\nAll plots saved to {out_dir}")
 

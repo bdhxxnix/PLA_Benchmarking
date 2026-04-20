@@ -1,0 +1,32 @@
+exp_name: exp_ODF
+# OD-F: Update workload under hybrid framework (G6)
+# Goal: evaluate PLA impact when the index must handle insertions via a
+#        delta-buffer pattern (hybrid index approach from SIGMOD'24).
+#
+# The hybrid approach keeps a small in-memory delta buffer for new inserts
+# and uses the immutable disk-resident learned index for historical data.
+# Lookups check the delta buffer first, then the main index.
+#
+# Three workload scenarios:
+#   readonly  — baseline (no inserts)
+#   insert    — 100% inserts (delta buffer growth)
+#   hybrid    — 50% lookups / 50% inserts (the balanced hybrid case)
+#
+# Metrics: ops_s, p50/p95/p99_ns, io_pages_mean, seg_cnt, bytes_index.
+# Focus on: does PLA choice matter more under hybrid load?
+
+matrix:
+  scenario:       [ondisk]
+  pla:            [optimal, swing, greedy]
+  epsilon:        [64, 128, 256]
+  threads:        [1]
+  dataset:        [synth_uniform_1M, synth_lognormal_1M]
+  workload:       [readonly, insert, hybrid]
+  fetch_strategy: [1]
+  granularity:    [item]
+  page_align:     [false]
+
+n_keys:  1000000
+queries: 100000
+
+extra_flags: {}

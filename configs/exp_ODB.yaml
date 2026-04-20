@@ -1,0 +1,32 @@
+exp_name: exp_ODB
+# OD-B: On-disk end-to-end iso-ε — fixed G1/G2/G3, vary PLA
+# Goal: with all optimization strategies fixed, does the PLA choice change
+#        throughput, memory, and page count?
+#
+# Fixed outer shell:
+#   G1: all-at-once (fetch_strategy=1)  — best strategy for most cases
+#   G2: item-level granularity           — default, matches inmem semantics
+#   G3: page-align OFF                   — isolates pure PLA effect first
+#
+# Metrics: ops_s, p50/p95/p99_ns, io_pages_mean, seg_cnt, bytes_index.
+#
+# Key observations:
+#   - PLA with fewer segments may enable faster routing (fewer cache misses)
+#   - More accurate prediction (lower avg error) → narrower last-mile → fewer pages
+#   - Interaction between epsilon and io_pages_mean is the primary signal
+
+matrix:
+  scenario:       [ondisk]
+  pla:            [optimal, swing, greedy]
+  epsilon:        [16, 64, 128, 512]
+  threads:        [1]
+  dataset:        [synth_uniform_1M, synth_lognormal_1M]
+  workload:       [readonly]
+  fetch_strategy: [1]
+  granularity:    [item]
+  page_align:     [false]
+
+n_keys:  1000000
+queries: 100000
+
+extra_flags: {}

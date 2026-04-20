@@ -1,0 +1,31 @@
+exp_name: exp_DWB
+# DW-B: End-to-end iso-ε dynamic workload — read/insert ratio sweep
+# Goal: at the same ε, does swapping the PLA method change mixed-workload
+#        throughput and tail latency across different read/write balances?
+#
+# Three workload points:
+#   readonly    — 0% inserts (pure lookup after bulk-load)
+#   balanced    — 50% inserts
+#   write_heavy — 90% inserts
+#
+# Metrics: ops_s, p50/p95/p99_ns, retrain_ms, retrain_count, seg_cnt.
+#
+# Key observations:
+#   - PLA choice matters more under write-heavy (retrain dominates)
+#   - At readonly, differences reflect prediction accuracy (avg error)
+#   - Retrain p95 latency spikes visible with OptimalPLA on large n
+
+matrix:
+  scenario:       [dynamic]
+  pla:            [optimal, swing, greedy]
+  epsilon:        [32, 64, 128]
+  threads:        [1, 4]
+  dataset:        [synth_uniform_1M]
+  workload:       [readonly, balanced, write_heavy]
+  fetch_strategy: [-1]
+
+n_keys:  1000000
+queries: 0
+
+extra_flags:
+  sample_rate: 100

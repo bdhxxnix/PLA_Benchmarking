@@ -1,0 +1,29 @@
+exp_name: exp_DWA
+# DW-A: PLA-only cost in dynamic retrain path
+# Goal: under heavy write load (90% inserts), how do the three PLA algorithms
+#        differ in retrain time, output segment count, and memory?
+#        This isolates the "model re-construction" cost from query serving cost.
+#
+# Metrics: build_ms (initial), retrain_ms (cumulative), retrain_count,
+#          retrain_p50_ms / retrain_p95_ms, seg_cnt.
+#
+# Key observations:
+#   - GreedyPLA and SwingFilter are O(1) space per segment → faster retrain
+#   - OptimalPLA global optimality requires O(n) auxiliary → slower for large n
+#   - retrain_window_p99_ns shows latency spikes during retrain
+
+matrix:
+  scenario:       [dynamic]
+  pla:            [optimal, swing, greedy]
+  epsilon:        [8, 32, 64, 128, 256]
+  threads:        [1]
+  dataset:        [synth_uniform_1M]
+  workload:       [write_heavy]
+  fetch_strategy: [-1]
+  insert_ratio:   [0.9]
+
+n_keys:  1000000
+queries: 0
+
+extra_flags:
+  sample_rate: 100

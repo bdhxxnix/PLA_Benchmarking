@@ -33,7 +33,7 @@ struct Segment {
 
     // Predict position for a query key (unclamped).
     [[nodiscard]] double predict_raw(uint64_t key) const noexcept {
-        return slope * static_cast<double>(key - key_lo) + static_cast<double>(rank_lo);
+        return slope * static_cast<double>(key - key_lo) + intercept;
     }
 };
 
@@ -180,7 +180,9 @@ inline int64_t verify_epsilon(const PlaResult& result, const uint64_t* keys, siz
             max_err = std::max(max_err, static_cast<int64_t>(i));
             continue;
         }
-        int64_t pred = static_cast<int64_t>(seg->predict_raw(keys[i]));
+        // Use llround so that floating-point predictions within 0.5 of an integer
+        // boundary are not rounded away from the true rank by C++ truncation.
+        int64_t pred = static_cast<int64_t>(std::llround(seg->predict_raw(keys[i])));
         max_err = std::max(max_err, std::abs(pred - static_cast<int64_t>(i)));
     }
     if (max_err > result.epsilon) {

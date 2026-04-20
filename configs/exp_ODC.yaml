@@ -1,0 +1,30 @@
+exp_name: exp_ODC
+# OD-C: G1 fetch strategy × PLA interaction matrix
+# Goal: verify that PLA choice interacts with the fetch strategy selection.
+#        Hypothesis: PLA algorithms that produce larger Rp change which fetch
+#        strategy is optimal.
+#
+# The paper shows: all-at-once generally wins, but one-by-one can win at
+# high thread count or with high-end SSDs.  This experiment fixes threads=1
+# and varies ε to span Rp≈1, Rp≈2-4, Rp≈8-16 regimes.
+#
+# Full 3×4 matrix per PLA: {optimal,swing,greedy} × {0,1,2,3 fetch strategies}
+# at 3 representative ε values.
+#
+# Metrics: ops_s, p99_ns, io_pages_mean.
+
+matrix:
+  scenario:       [ondisk]
+  pla:            [optimal, swing, greedy]
+  epsilon:        [16, 128, 1024]
+  threads:        [1]
+  dataset:        [synth_uniform_1M]
+  workload:       [readonly]
+  fetch_strategy: [0, 1, 2, 3]
+  granularity:    [item]
+  page_align:     [false]
+
+n_keys:  1000000
+queries: 100000
+
+extra_flags: {}

@@ -1,0 +1,25 @@
+exp_name: exp_IMA
+# IM-A: PLA-only iso-ε baseline curves
+# Goal: establish "given ε, what is the difference in segment count, build
+#        time, memory, and segment/slope distributions across the three PLA
+#        algorithms?"  This is the prerequisite for interpreting all end-to-end
+#        results.
+#
+# Key observations to look for:
+#   - OptimalPLA ≤ Greedy ≤ Swing in segment count for all ε
+#   - Parallel build overhead: extra segments proportional to thread count
+#   - Segment length distribution reveals how "clustered" each algorithm is
+
+matrix:
+  scenario:       [pla_only]
+  pla:            [optimal, swing, greedy]
+  epsilon:        [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
+  threads:        [1, 2, 4, 8]
+  dataset:        [synth_uniform_1M, synth_lognormal_1M]
+  workload:       [build_only]
+  fetch_strategy: [-1]
+
+n_keys:  1000000
+queries: 0
+
+extra_flags: {}

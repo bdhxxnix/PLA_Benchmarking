@@ -144,6 +144,31 @@ def build_cmd(case: Dict[str, Any]) -> List[str]:
     if scenario == "ondisk" and case.get("fetch_strategy", -1) >= 0:
         cmd += ["--fetch-strategy", str(case["fetch_strategy"])]
 
+    # ── New flags for IM-B, DW-A/B, OD-A..F experiments ─────────────────────
+    # --index: routing mode for inmem (pgm-index | fiting-tree)
+    if case.get("index"):
+        cmd += ["--index", str(case["index"])]
+
+    # --granularity: item or page level prediction (ondisk G2)
+    if case.get("granularity"):
+        cmd += ["--granularity", str(case["granularity"])]
+
+    # --page-align: extend search range to page boundaries (ondisk G3)
+    if str(case.get("page_align", "false")).lower() in ("true", "1", "yes"):
+        cmd += ["--page-align"]
+
+    # --target-rp: iso-Rp mode (ondisk OD-A)
+    if case.get("target_rp") and float(case["target_rp"]) > 0:
+        cmd += ["--target-rp", str(case["target_rp"])]
+
+    # --insert-ratio: explicit insert fraction (dynamic DW-A/B)
+    if case.get("insert_ratio") is not None:
+        cmd += ["--insert-ratio", str(case["insert_ratio"])]
+
+    # --sample-rate: latency sampling rate (dynamic)
+    if case.get("sample_rate"):
+        cmd += ["--sample-rate", str(case["sample_rate"])]
+
     return cmd
 
 

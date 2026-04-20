@@ -60,6 +60,16 @@ COLUMNS = [
     "rss_mb", "fetch_strategy", "io_pages",
     "cache_miss_rate", "ipc",
     "max_err", "retrain_ms", "retrain_count", "n_keys", "dup_runs",
+    # IM-A segment statistics
+    "seg_len_mean", "seg_len_p50", "seg_len_p95",
+    "rank_span_mean", "slope_mean", "slope_std", "intercept_std",
+    # IM-B routing metadata
+    "routing", "index_levels", "seg_cnt_l1",
+    # DW-A/B retrain analysis
+    "retrain_p50_ms", "retrain_p95_ms", "retrain_window_p99_ns",
+    # OD-A..F page-level metrics
+    "granularity", "page_align", "target_rp",
+    "io_pages_mean", "io_pages_p50", "io_pages_p95", "io_pages_p99",
 ]
 
 

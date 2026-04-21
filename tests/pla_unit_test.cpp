@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <iostream>
@@ -36,17 +37,7 @@ static std::vector<uint64_t> make_random_sorted(size_t n, uint64_t seed = 42) {
     return v;
 }
 
-static std::vector<uint64_t> make_duplicates(size_t n) {
-    // n/4 unique values, each repeated 4 times.
-    std::vector<uint64_t> v;
-    v.reserve(n);
-    for (size_t i = 0; i < n/4; ++i)
-        for (int r = 0; r < 4; ++r)
-            v.push_back(i * 100);
-    std::sort(v.begin(), v.end());
-    v.resize(n);
-    return v;
-}
+
 
 static std::vector<uint64_t> make_lognormal(size_t n, uint64_t seed = 99) {
     std::mt19937_64 rng(seed);
@@ -83,7 +74,7 @@ static bool run_test(const std::string& label,
             max_err = std::max(max_err, static_cast<int64_t>(i));
             continue;
         }
-        int64_t pred = static_cast<int64_t>(seg->predict_raw(keys[i]));
+        int64_t pred = static_cast<int64_t>(std::llround(seg->predict_raw(keys[i])));
         int64_t err  = std::abs(pred - static_cast<int64_t>(i));
         if (err > epsilon) {
             if (ok) // print first violation only
@@ -115,10 +106,9 @@ int main() {
                 std::string algo_s = pla::algo_to_string(algo);
                 std::string prefix = algo_s + "_n" + std::to_string(n) + "_e" + std::to_string(eps);
 
-                // all_pass &= run_test(prefix + "_seq",  make_sequential(n),     eps, algo);
+                all_pass &= run_test(prefix + "_seq",  make_sequential(n),     eps, algo);
                 all_pass &= run_test(prefix + "_rnd",  make_random_sorted(n),  eps, algo);
-                // all_pass &= run_test(prefix + "_dup",  make_duplicates(n),     eps, algo);
-                // all_pass &= run_test(prefix + "_logn", make_lognormal(n),      eps, algo);
+                all_pass &= run_test(prefix + "_logn", make_lognormal(n),      eps, algo);
             }
         }
     }

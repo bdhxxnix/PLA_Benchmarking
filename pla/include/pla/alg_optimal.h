@@ -39,15 +39,36 @@ inline Segment canonical_to_segment(
         int64_t rank_lo,
         int64_t rank_hi,
         uint64_t key_hi_val) {
-    // PGM stores slope and intercept such that: pos ≈ slope*(key-first)+intercept
-    auto [cs_slope, cs_intercept] = cs.get_floating_point_segment(cs.get_first_x());
     Segment s;
-    s.key_lo    = static_cast<uint64_t>(cs.get_first_x());
-    s.key_hi    = key_hi_val;
-    s.slope     = cs_slope;
-    s.intercept = cs_intercept;
-    s.rank_lo   = rank_lo;
-    s.rank_hi   = rank_hi;
+    s.key_lo  = static_cast<uint64_t>(cs.get_first_x());
+    s.key_hi  = key_hi_val;
+    s.rank_lo = rank_lo;
+    s.rank_hi = rank_hi;
+
+    auto [min_slope, max_slope] = cs.get_slope_range();
+
+    // get_slope_range() returns {0, 1} exclusively for one-point segments (hardcoded
+    // in PGM). For one-point, get_floating_point_segment returns {0, rank} correctly.
+    if (min_slope == 0.L && max_slope == 1.L) {
+        auto [cs_slope, cs_intercept] = cs.get_floating_point_segment(cs.get_first_x());
+        s.slope     = static_cast<double>(cs_slope);
+        s.intercept = static_cast<double>(cs_intercept);
+        return s;
+    }
+
+    // For integer key/value types, get_floating_point_segment uses the lower bounding
+    // line (max_slope direction) and truncates the intercept to SY (int64_t).  This
+    // biases every prediction ~epsilon below the true rank, and the integer truncation
+    // adds another ±1, yielding |pred - i| <= epsilon+1 rather than <= epsilon.
+    //
+    // Fix: use the midpoint slope and the true floating-point intersection intercept,
+    // matching the float-type path of get_floating_point_segment.
+    long double slope     = (min_slope + max_slope) / 2.0L;
+    auto [i_x, i_y]      = cs.get_intersection();
+    long double intercept = i_y - (i_x - static_cast<long double>(s.key_lo)) * slope;
+
+    s.slope     = static_cast<double>(slope);
+    s.intercept = static_cast<double>(intercept);
     return s;
 }
 

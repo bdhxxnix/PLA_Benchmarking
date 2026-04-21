@@ -13,3 +13,5 @@ results/agg/metadata.json
 data/
 CLAUDE.md
 .vscode
+.claude/
+

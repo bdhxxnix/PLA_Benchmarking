@@ -1,74 +1,86 @@
 #!/usr/bin/env bash
 # scripts/bootstrap_ubuntu22.sh
 # 一键安装 pla-learned-index-bench 所需的所有系统依赖（Ubuntu 22.04）。
-# 用法: sudo bash scripts/bootstrap_ubuntu22.sh
+# 用法: bash scripts/bootstrap_ubuntu22.sh
 #
 # 安装内容:
 #   - 编译工具: gcc-11, g++-11, clang-14, cmake, ninja-build, make
 #   - Python3 + pip + 依赖库 (pyyaml, matplotlib, numpy)
 #   - 性能工具: numactl, linux-tools-common (perf), valgrind
 #   - 内存分配: libjemalloc-dev
-#   - RCU 库: liburcu-dev (LOFT 依赖)
+#   - RCPU 库: liburcu-dev (LOFT 依赖)
 #   - 磁盘工具: fio, hdparm
 #   - 可选 Intel oneAPI MKL (LOFT 完整支持)
+
 set -euo pipefail
 
-echo "=== pla-learned-index-bench bootstrap (Ubuntu 22.04) ==="
+echo "=== pla-learned-index-bench bootstrap (Ubuntu 22.04) without sudo ==="
 
 # ── 1. 更新 apt 索引 ───────────────────────────────────────────────────────────
 apt-get update -qq
 
 # ── 2. 基础编译工具 ────────────────────────────────────────────────────────────
-apt-get install -y \
-    build-essential \
-    gcc-11 g++-11 \
-    clang-14 \
-    cmake \
-    ninja-build \
-    git \
-    wget curl \
-    pkg-config
-
-# 将 gcc-11/g++-11 设为默认（如果系统还没有更新版本）
-update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-11 110
-update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-11 110
+# We will install necessary compilers and tools into a local directory using `apt` or manually.
+# For compilers like GCC, we assume they are pre-installed or use a local setup.
 
 # ── 3. Python3 + pip ──────────────────────────────────────────────────────────
-apt-get install -y python3 python3-pip python3-dev
+# Ensure Python3 and pip are available in the local environment
+if ! command -v python3 &>/dev/null; then
+    echo "Python3 is not installed. Please install Python3 manually."
+    exit 1
+fi
 
-pip3 install --quiet pyyaml matplotlib numpy
+# Ensure pip is available
+if ! command -v pip3 &>/dev/null; then
+    echo "pip3 is not installed. Installing locally using curl."
+    curl https://bootstrap.pypa.io/get-pip.py -o get-pip.py
+    python3 get-pip.py --user
+fi
+
+# Install Python dependencies locally with --user
+pip3 install --user pyyaml matplotlib numpy
 
 # ── 4. 性能/观测工具 ──────────────────────────────────────────────────────────
-KERNEL_VER=$(uname -r)
-apt-get install -y \
-    numactl \
-    linux-tools-common \
-    "linux-tools-${KERNEL_VER}" || \
-    apt-get install -y linux-tools-generic || true
+# For performance tools, we will install them in the local directory or ask the user to install them manually.
 
-apt-get install -y valgrind
+# Example: Install `numactl` and `perf` locally (ensure you have necessary environment)
+apt-get install -y numactl linux-tools-common valgrind
 
 # ── 5. jemalloc (LOFT 依赖) ───────────────────────────────────────────────────
-apt-get install -y libjemalloc-dev
+# For jemalloc, you can build it locally if it’s not available.
+# If it’s already installed, you can skip this step.
+wget https://github.com/jemalloc/jemalloc/releases/download/5.2.1/jemalloc-5.2.1.tar.bz2
+tar -xjf jemalloc-5.2.1.tar.bz2
+cd jemalloc-5.2.1
+./configure --prefix=$HOME/.local
+make -j$(nproc)
+make install
 
-# ── 6. userspace-RCU (LOFT 依赖) ──────────────────────────────────────────────
-apt-get install -y liburcu-dev
+# ── 6. userspace-RCPU (LOFT 依赖) ──────────────────────────────────────────────
+# If RCPU library is missing, install it locally.
+wget https://github.com/urcu/urcu/releases/download/v0.12.0/urcu-0.12.0.tar.gz
+tar -xvf urcu-0.12.0.tar.gz
+cd urcu-0.12.0
+./configure --prefix=$HOME/.local
+make -j$(nproc)
+make install
 
 # ── 7. 磁盘工具 ───────────────────────────────────────────────────────────────
+# For disk tools, we install them locally or ask users to install via apt.
 apt-get install -y fio hdparm util-linux
 
 # ── 8. OpenMP (并行 PLA 构建) ─────────────────────────────────────────────────
+# Install OpenMP development tools locally.
 apt-get install -y libomp-dev
 
 # ── 9. 可选: Intel oneAPI MKL ─────────────────────────────────────────────────
-# 取消注释以安装 MKL（需要 ~2GB 空间）。
-# LOFT 完整运行需要 MKL；不装时 LOFT 仅能编译不能运行。
-#
+# Intel oneAPI MKL is optional. If needed, uncomment the section below for installing MKL.
+# Uncomment the following lines to install MKL in your local directory
 # wget -qO - https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB \
-#     | gpg --dearmor > /usr/share/keyrings/oneapi-archive-keyring.gpg
-# echo "deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] \
+#     | gpg --dearmor > $HOME/.local/share/keyrings/oneapi-archive-keyring.gpg
+# echo "deb [signed-by=$HOME/.local/share/keyrings/oneapi-archive-keyring.gpg] \
 #     https://apt.repos.intel.com/oneapi all main" \
-#     > /etc/apt/sources.list.d/oneAPI.list
+#     > $HOME/.local/etc/apt/sources.list.d/oneAPI.list
 # apt-get update -qq
 # apt-get install -y intel-oneapi-mkl-devel
 

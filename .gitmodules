@@ -1,20 +1,20 @@
 [submodule "third_party/PGM-index"]
     path = third_party/PGM-index
-    url = https://github.com/gvinciguerra/PGM-index.git
+    url = git@github.com:gvinciguerra/PGM-index.git
     branch = master
 
 [submodule "third_party/FITing-Tree"]
 	path = third_party/FITing-Tree
-	url = https://github.com/RKolla99/FITing-Tree.git
+	url = git@github.com:RKolla99/FITing-Tree.git
 
 [submodule "third_party/LOFT"]
 	path = third_party/LOFT
-	url = https://github.com/yuxuanmo/LOFT.git
+	url = git@github.com:yuxuanmo/LOFT.git
 
 [submodule "third_party/Efficient-Disk-Learned-Index"]
 	path = third_party/Efficient-Disk-Learned-Index
-	url = https://github.com/embryo-labs/Efficient-Disk-Learned-Index.git
+	url = git@github.com:embryo-labs/Efficient-Disk-Learned-Index.git
 
 [submodule "third_party/SOSD"]
 	path = third_party/SOSD
-	url = https://github.com/learnedsystems/SOSD.git
+	url = git@github.com:learnedsystems/SOSD.git

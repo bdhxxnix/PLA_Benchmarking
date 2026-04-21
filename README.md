@@ -65,9 +65,9 @@ pla-learned-index-bench/
 # 1. Install dependencies
 sudo bash scripts/bootstrap_ubuntu22.sh
 
-# 2. Clone with submodules
-git clone --recursive https://github.com/YOUR_ORG/pla-learned-index-bench
-cd pla-learned-index-bench
+# 2. Update submodules
+git submodule init
+git submodule update --remote --recursive
 
 # 3. Apply adapter patches
 bash scripts/apply_patches.sh

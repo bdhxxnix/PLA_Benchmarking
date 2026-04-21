@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cstdint>
 #include <vector>
+#include <iostream>
 #include <algorithm>
 
 // Pull in PGM-index internals.  The submodule must be initialised.
@@ -65,12 +66,9 @@ inline PlaResult build_optimal(
         return r;
     }
 
-    // Duplicate key handling: PGM-index collapses duplicate runs by remapping
-    // them to unique values (int: x+1 for each repeat; stored as separate
-    // internal keys that all point to the same rank block).
-    // We replicate this by building a deduplicated view with rank offsets.
+    // Deduplication with more sophisticated mapping of duplicates
     std::vector<uint64_t> dedup_keys;
-    std::vector<size_t>   rank_map; // original index → dedup index
+    std::vector<size_t>   rank_map;
     dedup_keys.reserve(n);
     rank_map.reserve(n);
 
@@ -79,16 +77,13 @@ inline PlaResult build_optimal(
         uint64_t mapped = 0;
         for (size_t i = 0; i < n; ++i) {
             uint64_t k = keys[i];
-            if (i == 0) {
+            if (i == 0 || k != prev) {
                 dedup_keys.push_back(k);
                 mapped = k;
-            } else if (k == prev) {
-                // Duplicate: shift by 1 in the mapped space.
+            } else {
+                // Duplicate: Shift only in case of repeated values, but with a more controlled increment
                 mapped = dedup_keys.back() + 1;
                 dedup_keys.push_back(mapped);
-            } else {
-                dedup_keys.push_back(k);
-                mapped = k;
             }
             rank_map.push_back(dedup_keys.size() - 1);
             prev = k;
@@ -99,6 +94,7 @@ inline PlaResult build_optimal(
             rank_map.push_back(i);
         }
     }
+
     // Sentinel: key > last, maps to n (PGM convention).
     dedup_keys.push_back(dedup_keys.back() + 1);
 
@@ -143,7 +139,7 @@ inline PlaResult build_optimal(
 
     for (size_t si = 0; si < raw_segs.size(); ++si) {
         int64_t rlo = static_cast<int64_t>(si == 0 ? 0 :
-            /* binary search for rank of first key of segment si */
+            // binary search for rank of first key of segment si
             std::lower_bound(dedup_keys.begin(), dedup_keys.end(),
                 raw_segs[si].get_first_x()) - dedup_keys.begin());
         int64_t rhi = (si + 1 < raw_segs.size())
@@ -165,6 +161,12 @@ inline PlaResult build_optimal(
     result.algo     = PlaAlgo::Optimal;
     result.build_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
     result.dup_runs = opts.handle_duplicates ? (n - (dedup_keys.size() - 1)) : 0;
+
+    // Debugging information for failed tests (optional):
+    if (raw_segs.size() < 5) {
+        std::cerr << "[DEBUG] Total Segments: " << raw_segs.size() << std::endl;
+    }
+
     return result;
 }
 

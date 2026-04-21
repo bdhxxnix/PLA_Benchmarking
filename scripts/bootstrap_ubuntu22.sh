@@ -14,68 +14,59 @@
 
 set -euo pipefail
 
-echo "=== pla-learned-index-bench bootstrap (Ubuntu 22.04) without sudo ==="
+echo "=== pla-learned-index-bench bootstrap (without sudo) ==="
 
-# ── 1. 更新 apt 索引 ───────────────────────────────────────────────────────────
-apt-get update -qq
-
-# ── 2. 基础编译工具 ────────────────────────────────────────────────────────────
-# We will install necessary compilers and tools into a local directory using `apt` or manually.
-# For compilers like GCC, we assume they are pre-installed or use a local setup.
-
-# ── 3. Python3 + pip ──────────────────────────────────────────────────────────
-# Ensure Python3 and pip are available in the local environment
-if ! command -v python3 &>/dev/null; then
-    echo "Python3 is not installed. Please install Python3 manually."
-    exit 1
+# ── 1. 检查并安装conda ─────────────────────────────────────────────────────
+# 如果没有conda安装，我们提供 Miniconda 安装。
+if ! command -v conda &>/dev/null; then
+    echo "Conda not found. Installing Miniconda locally..."
+    curl -sSL https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -o miniconda.sh
+    bash miniconda.sh -b -p $HOME/miniconda
+    export PATH="$HOME/miniconda/bin:$PATH"
 fi
 
-# Ensure pip is available
-if ! command -v pip3 &>/dev/null; then
-    echo "pip3 is not installed. Installing locally using curl."
-    curl https://bootstrap.pypa.io/get-pip.py -o get-pip.py
-    python3 get-pip.py --user
-fi
+# 创建一个新的conda环境，并激活它
+conda create -y -n pla-env python=3.9
+conda activate pla-env
 
-# Install Python dependencies locally with --user
-pip3 install --user pyyaml matplotlib numpy
+# ── 2. Python3 + pip ──────────────────────────────────────────────────────────
+# 安装Python依赖库
+pip install --user pyyaml matplotlib numpy
 
-# ── 4. 性能/观测工具 ──────────────────────────────────────────────────────────
-# For performance tools, we will install them in the local directory or ask the user to install them manually.
+# ── 3. 安装性能/观测工具 ─────────────────────────────────────────────────────
+# 使用conda安装性能工具
+conda install -y numactl valgrind
 
-# Example: Install `numactl` and `perf` locally (ensure you have necessary environment)
-apt-get install -y numactl linux-tools-common valgrind
-
-# ── 5. jemalloc (LOFT 依赖) ───────────────────────────────────────────────────
-# For jemalloc, you can build it locally if it’s not available.
-# If it’s already installed, you can skip this step.
+# ── 4. jemalloc (LOFT 依赖) ───────────────────────────────────────────────────
+# 下载并安装 jemalloc
 wget https://github.com/jemalloc/jemalloc/releases/download/5.2.1/jemalloc-5.2.1.tar.bz2
 tar -xjf jemalloc-5.2.1.tar.bz2
 cd jemalloc-5.2.1
 ./configure --prefix=$HOME/.local
 make -j$(nproc)
 make install
+cd ..
 
-# ── 6. userspace-RCPU (LOFT 依赖) ──────────────────────────────────────────────
-# If RCPU library is missing, install it locally.
+# ── 5. userspace-RCPU (LOFT 依赖) ──────────────────────────────────────────────
+# 下载并安装 RCPU (liburcu)
 wget https://github.com/urcu/urcu/releases/download/v0.12.0/urcu-0.12.0.tar.gz
 tar -xvf urcu-0.12.0.tar.gz
 cd urcu-0.12.0
 ./configure --prefix=$HOME/.local
 make -j$(nproc)
 make install
+cd ..
 
-# ── 7. 磁盘工具 ───────────────────────────────────────────────────────────────
-# For disk tools, we install them locally or ask users to install via apt.
-apt-get install -y fio hdparm util-linux
+# ── 6. 安装磁盘工具 ───────────────────────────────────────────────────────────
+# 使用conda安装磁盘工具
+conda install -y fio hdparm
 
-# ── 8. OpenMP (并行 PLA 构建) ─────────────────────────────────────────────────
-# Install OpenMP development tools locally.
-apt-get install -y libomp-dev
+# ── 7. OpenMP (并行 PLA 构建) ─────────────────────────────────────────────────
+# 使用conda安装OpenMP
+conda install -y libomp
 
-# ── 9. 可选: Intel oneAPI MKL ─────────────────────────────────────────────────
-# Intel oneAPI MKL is optional. If needed, uncomment the section below for installing MKL.
-# Uncomment the following lines to install MKL in your local directory
+# ── 8. 可选: Intel oneAPI MKL ─────────────────────────────────────────────────
+# 如果需要 Intel oneAPI MKL，可以解开以下部分
 # wget -qO - https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB \
 #     | gpg --dearmor > $HOME/.local/share/keyrings/oneapi-archive-keyring.gpg
 # echo "deb [signed-by=$HOME/.local/share/keyrings/oneapi-archive-keyring.gpg] \

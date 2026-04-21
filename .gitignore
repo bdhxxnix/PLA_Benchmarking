@@ -12,3 +12,4 @@ results/agg/*.png
 results/agg/metadata.json
 data/
 CLAUDE.md
+.vscode

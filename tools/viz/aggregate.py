@@ -60,6 +60,8 @@ COLUMNS = [
     "rss_mb", "fetch_strategy", "io_pages",
     "cache_miss_rate", "ipc",
     "max_err", "retrain_ms", "retrain_count", "n_keys", "dup_runs",
+    # dynamic workload operation counts and lookup-only throughput
+    "n_insert", "n_lookup", "lookup_ops_s",
     # IM-A segment statistics
     "seg_len_mean", "seg_len_p50", "seg_len_p95",
     "rank_span_mean", "slope_mean", "slope_std", "intercept_std",

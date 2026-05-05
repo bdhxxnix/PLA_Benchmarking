@@ -39,6 +39,8 @@ pla-learned-index-bench/
 │   │   └── alg_greedy.h    # GreedyPLA
 ├── adapters/               # minimal patch files per submodule
 ├── bench/
+│   ├── perf_counters.h     # shared HW counter wrapper (Linux perf_event_open)
+│   ├── rss.h               # shared RSS measurement (/proc/self/statm)
 │   ├── pla_only/           # build + verify only
 │   ├── inmem/              # end-to-end lookup
 │   ├── dynamic/            # insert/lookup mixed workload
@@ -104,17 +106,51 @@ algorithm before running the corresponding cases.
 
 ## Running experiments
 
+The pipeline is YAML-driven. Pick a config from `configs/`, then:
+
 ```bash
-# Full matrix from YAML config
+# Positional or --config flag (both work)
+python3 tools/runner/run.py configs/exp_example.yaml
 python3 tools/runner/run.py --config configs/exp_example.yaml
 
-# Only pla_only scenario, optimal algorithm
-python3 tools/runner/run.py --config configs/exp_example.yaml \
-    --filter-scenario pla_only --filter-pla optimal
+# Smoke test: first 4 cases, 100K keys (fast verification)
+python3 tools/runner/run.py configs/exp_example.yaml --smoke
 
-# Dry run (print commands without executing)
-python3 tools/runner/run.py --config configs/exp_example.yaml --dry-run
+# Filter by scenario, PLA algorithm, or both
+python3 tools/runner/run.py configs/exp_example.yaml \
+    --filter-scenario inmem --filter-pla optimal
+
+# Dry run — print commands without executing
+python3 tools/runner/run.py configs/exp_example.yaml --dry-run
+
+# Skip rebuild if you've already built the right PLA_ALGO
+python3 tools/runner/run.py configs/exp_example.yaml --no-build
 ```
+
+The runner handles the full lifecycle per run:
+1. Reads the YAML config and expands the Cartesian product of the matrix
+2. Groups cases by PLA algorithm, rebuilds CMake once per unique PLA value
+3. Executes each benchmark binary, appends JSONL to `results/raw/<scenario>.jsonl`
+4. Writes `results/agg/metadata.json` with git revision and platform info
+5. Auto-invokes `aggregate.py` and `plots.py`
+
+### Experiment configs
+
+| Config | Scenario family | Description |
+|---|---|---|
+| `exp_example.yaml` | All four | Quick demo (1M keys synth), used for smoke tests |
+| `exp_smoke_sosd.yaml` | pla_only, inmem | Smoke test against real SOSD 1M subset (`data/sosd_fb_1M`) |
+| `exp_IMA.yaml` | pla_only | Iso-epsilon baseline curves (sweeps ε=8..8192, threads 1/2/4/8) |
+| `exp_IMB.yaml` | inmem | End-to-end lookup with routing comparison (PGM-index vs FITing-Tree) |
+| `exp_DWA.yaml` | dynamic | PLA cost in retrain path (90% inserts, 5 ε values) |
+| `exp_DWB.yaml` | dynamic | Read/insert ratio sweep (readonly, balanced, write_heavy) |
+| `exp_ODA.yaml` | ondisk | Iso-epsilon and iso-RP baseline (maps ε to pages/query) |
+| `exp_ODB.yaml` | ondisk | End-to-end iso-epsilon with fixed G1/G2/G3 |
+| `exp_ODC.yaml` | ondisk | G1 fetch strategy (0/1/2/3) × PLA interaction |
+| `exp_ODD.yaml` | ondisk | G2 prediction granularity (item vs page) |
+| `exp_ODE.yaml` | ondisk | G3 page-alignment (on/off) |
+| `exp_ODF.yaml` | ondisk | Update workload under hybrid framework (readonly/insert/hybrid) |
+| `fb_experiment.yaml` | pla_only, inmem | Real-data config using SOSD Facebook 200M |
 
 ## Generating datasets
 
@@ -160,9 +196,21 @@ fetch_strategy codes:
 | 2 | all-at-once-sorted (sorted page list) |
 | 3 | model-biased (fetch only predicted page) |
 
+Additional on-disk flags:
+
+| Flag | Description |
+|------|-------------|
+| `--compress` | G4: compress slope/intercept double→float (16.7% index size reduction) |
+| `--direct-io` | Bypass OS page cache with `O_DIRECT` + `pread` (default: mmap) |
+| `--granularity item\|page` | G2: prediction at item rank vs page number |
+| `--page-align` | G3: extend search range to page boundaries |
+| `--target-rp N` | iso-RP: binary-search ε to achieve N pages/query target |
+| `--workload readonly\|insert\|hybrid` | OD-F: hybrid workload with delta buffer |
+
 ## LOFT dynamic benchmark
 
-LOFT requires MKL, jemalloc, and urcu:
+LOFT requires MKL, jemalloc, and urcu. Falls back to `NaiveDynamic` (sorted vector
++ periodic retrain every 10K inserts) when these are unavailable.
 
 ```bash
 # With MKL
@@ -171,18 +219,39 @@ cmake --build build -j$(nproc)
 ./build/dynamic_bench --algo optimal --epsilon 64 --threads 4 \
     --n 1000000 --insert-ratio 0.5
 
-# Without MKL (fallback stub, no LOFT internals)
+# Without MKL (NaiveDynamic fallback)
 cmake -S . -B build -DUSE_MKL=OFF
+cmake --build build -j$(nproc)
+
+# With external dataset (splits into initial keys + insert stream)
+./build/dynamic_bench --algo optimal --epsilon 128 \
+    --dataset data/sosd_fb_1M --n 100000
+
+# Workload modes
+./build/dynamic_bench --workload readonly    # 0% inserts
+./build/dynamic_bench --workload balanced    # 50% inserts
+./build/dynamic_bench --workload write_heavy # 90% inserts
 ```
 
 ## Hardware perf counters
 
+All four benchmarks collect Linux `perf_event_open` counters directly (cache-misses,
+instructions, cycles, branch-misses) and report them in JSONL output. No external
+profiling tool needed.
+
 ```bash
+# Built-in: counters appear automatically in JSONL output
+./build/pla_build_bench --epsilon 64 --dataset data/sosd_fb_1M --n 1000000
+# → "cache_misses":263214,"instructions":477122454,"cycles":107785023,...
+
+# External perf stat wrapper (averages over 3 runs)
 bash scripts/perf_stat.sh \
     --cmd "build/lookup_bench --algo optimal --epsilon 64 --n 1000000" \
     --exp-id lookup_optimal_e64
 # Results appended to results/raw/perf.jsonl
 ```
+
+Peak memory (RSS delta) is also reported as `rss_mb` in every benchmark's JSONL output.
 
 ## Output format
 
@@ -205,10 +274,26 @@ Each benchmark appends one JSONL line to `results/raw/<scenario>.jsonl`:
   "p50_ns": 120.0,
   "p95_ns": 245.0,
   "p99_ns": 380.0,
-  "cache_misses": 0,
+  "cache_misses": 138490,
+  "instructions": 48299108,
+  "cycles": 67325526,
+  "branch_misses": 952380,
+  "rss_mb": 23,
   "fetch_strategy": -1
 }
 ```
+
+Optional fields per scenario:
+
+| Field | Scenario | Meaning |
+|---|---|---|
+| `routing`, `index_levels`, `seg_cnt_l1` | inmem | PGM-index recursive layer info |
+| `retrain_ms`, `retrain_count`, `retrain_p50_ms` | dynamic | Retrain cost statistics |
+| `io_pages_mean`, `io_pages_p50/95/99` | ondisk | I/O pages per query distribution |
+| `compress`, `bytes_compressed` | ondisk | G4 compression metrics |
+| `direct_io` | ondisk | Whether O_DIRECT was used |
+| `granularity`, `page_align` | ondisk | G2/G3 settings |
+| `seg_len_mean/p50/p95`, `slope_mean/std` | pla_only | Segment geometry statistics |
 
 Aggregation: `python3 tools/viz/aggregate.py` → `results/agg/results.csv`
 

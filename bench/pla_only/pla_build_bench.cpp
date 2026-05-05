@@ -21,6 +21,9 @@
 #include <string>
 #include <vector>
 
+#include "perf_counters.h"
+#include "rss.h"
+
 // ─── CLI helpers ─────────────────────────────────────────────────────────────
 static std::string get_arg(int argc, char** argv, const char* flag, const char* def = "") {
     for (int i = 1; i + 1 < argc; ++i)
@@ -68,10 +71,10 @@ using Ms    = std::chrono::duration<double, std::milli>;
 
 // ─── Segment statistics ───────────────────────────────────────────────────────
 struct SegStats {
-    double seg_len_mean  = 0;   // mean key span (key_hi - key_lo)
+    double seg_len_mean  = 0;   // mean rank span (rank_hi - rank_lo): keys per segment
     double seg_len_p50   = 0;
     double seg_len_p95   = 0;
-    double rank_span_mean= 0;   // mean rank span per segment
+    double rank_span_mean= 0;   // same as seg_len_mean (kept for schema compat)
     double slope_mean    = 0;
     double slope_std     = 0;
     double intercept_std = 0;
@@ -108,11 +111,11 @@ static SegStats compute_seg_stats(const pla::PlaResult& result) {
     intercepts.reserve(result.segments.size());
 
     for (const auto& seg : result.segments) {
-        // Skip last segment's key span (open-ended key_hi = UINT64_MAX).
-        if (seg.key_hi != std::numeric_limits<uint64_t>::max()) {
-            key_spans.push_back(static_cast<double>(seg.key_hi - seg.key_lo));
-        }
-        rank_spans.push_back(static_cast<double>(seg.rank_hi - seg.rank_lo));
+        // Rank span = number of keys covered by this segment.
+        // Skipping the last segment is not needed here since rank_hi is always valid.
+        double rspan = static_cast<double>(seg.rank_hi - seg.rank_lo);
+        key_spans.push_back(rspan);
+        rank_spans.push_back(rspan);
         slopes.push_back(seg.slope);
         intercepts.push_back(seg.intercept);
     }
@@ -170,7 +173,14 @@ int main(int argc, char** argv) {
     opts.threads           = static_cast<unsigned>(threads);
     opts.handle_duplicates = !has_flag(argc, argv, "--no-dup-handling");
 
+    size_t rss_before = get_rss_mb();
+
     // Run build 3 times and take median (warm cache).
+    PerfCounters perf;
+    perf.open_all();
+    perf.reset();
+    perf.enable();
+
     std::vector<double> times;
     pla::PlaResult result;
     for (int rep = 0; rep < 3; ++rep) {
@@ -179,6 +189,14 @@ int main(int argc, char** argv) {
     }
     std::sort(times.begin(), times.end());
     double build_ms = times[times.size() / 2];
+
+    perf.disable();
+    size_t rss_after = get_rss_mb();
+    int64_t rss_mb    = static_cast<int64_t>(rss_after) - static_cast<int64_t>(rss_before);
+    int64_t hw_cache  = perf.cache_misses()  / 3;
+    int64_t hw_instr  = perf.instructions()  / 3;
+    int64_t hw_cycles = perf.cycles()        / 3;
+    int64_t hw_brmiss = perf.branch_misses() / 3;
 
     // Verify epsilon guarantee.
     int64_t max_err = 0;
@@ -215,12 +233,19 @@ int main(int argc, char** argv) {
         << "\"seg_len_p50\":"      << ss.seg_len_p50   << ","
         << "\"seg_len_p95\":"      << ss.seg_len_p95   << ","
         << "\"rank_span_mean\":"   << ss.rank_span_mean << ","
+        // Slopes are ~1e-14 for uint64 key spaces; use scientific notation.
+        << std::scientific << std::setprecision(6)
         << "\"slope_mean\":"       << ss.slope_mean    << ","
         << "\"slope_std\":"        << ss.slope_std     << ","
+        << std::fixed << std::setprecision(6)
         << "\"intercept_std\":"    << ss.intercept_std << ","
         << "\"ops_s\":0,\"p50_ns\":0,\"p95_ns\":0,\"p99_ns\":0,"
-        << "\"cache_misses\":0,\"branches\":0,\"branch_misses\":0,"
-        << "\"instructions\":0,\"cycles\":0,\"rss_mb\":0,"
+        << "\"cache_misses\":"   << hw_cache  << ","
+        << "\"branches\":0,"
+        << "\"branch_misses\":"  << hw_brmiss << ","
+        << "\"instructions\":"   << hw_instr  << ","
+        << "\"cycles\":"         << hw_cycles << ","
+        << "\"rss_mb\":"        << rss_mb    << ","
         << "\"fetch_strategy\":-1,\"io_pages\":0"
         << "}\n";
     return 0;

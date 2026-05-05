@@ -21,12 +21,16 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <numeric>
 #include <random>
 #include <string>
 #include <vector>
+
+#include "perf_counters.h"
+#include "rss.h"
 
 using Clock = std::chrono::steady_clock;
 using Ns    = std::chrono::duration<double, std::nano>;
@@ -45,6 +49,17 @@ static double vec_pct(std::vector<double> v, double p) {
     std::sort(v.begin(), v.end());
     size_t idx = static_cast<size_t>(p / 100.0 * (v.size() - 1));
     return v[std::min(idx, v.size() - 1)];
+}
+
+// ─── Dataset loader ─────────────────────────────────────────────────────────
+static std::vector<uint64_t> load_binary(const std::string& path) {
+    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    if (!f) { std::cerr << "Cannot open: " << path << "\n"; std::exit(1); }
+    auto sz = f.tellg(); f.seekg(0);
+    size_t n = sz / sizeof(uint64_t);
+    std::vector<uint64_t> v(n);
+    f.read(reinterpret_cast<char*>(v.data()), sz);
+    return v;
 }
 
 // ─── NaiveDynamic: sorted vector + periodic retrain ──────────────────────────
@@ -70,16 +85,32 @@ struct NaiveDynamic {
 
     static constexpr size_t RETRAIN_INTERVAL = 10000; // inserts between retrains
 
+    // Accumulated hardware counters across all builds (bulk + retrains).
+    PerfCounters perf;
+    int64_t hw_cache  = 0;
+    int64_t hw_instr  = 0;
+    int64_t hw_cycles = 0;
+    int64_t hw_brmiss = 0;
+
     NaiveDynamic(int64_t eps, pla::PlaAlgo a, pla::PlaOptions o,
                  size_t sr = 100)
-        : epsilon(eps), algo(a), opts(o), sample_rate(sr) {}
+        : epsilon(eps), algo(a), opts(o), sample_rate(sr) {
+        perf.open_all();
+    }
 
     // Bulk-load initial dataset without triggering retrain.
     void bulk_load(std::vector<uint64_t>& init_keys) {
         data = init_keys;
+        perf.reset();
+        perf.enable();
         auto t0 = Clock::now();
         index = pla::build_pla(data, epsilon, algo, opts);
         double ms = Ms(Clock::now() - t0).count();
+        perf.disable();
+        hw_cache  += perf.cache_misses();
+        hw_instr  += perf.instructions();
+        hw_cycles += perf.cycles();
+        hw_brmiss += perf.branch_misses();
         retrain_times_ms.push_back(ms);
         retrain_ms_total += ms;
         ++retrain_count;
@@ -91,9 +122,16 @@ struct NaiveDynamic {
 
         if (data.size() % RETRAIN_INTERVAL == 0) {
             in_retrain_window = true;
+            perf.reset();
+            perf.enable();
             auto t0 = Clock::now();
             index = pla::build_pla(data, epsilon, algo, opts);
             double ms = Ms(Clock::now() - t0).count();
+            perf.disable();
+            hw_cache  += perf.cache_misses();
+            hw_instr  += perf.instructions();
+            hw_cycles += perf.cycles();
+            hw_brmiss += perf.branch_misses();
             in_retrain_window = false;
             retrain_times_ms.push_back(ms);
             retrain_ms_total += ms;
@@ -110,6 +148,8 @@ struct NaiveDynamic {
             found = std::binary_search(data.begin(), data.end(), key);
         } else {
             auto r = index.search_range(key);
+            r.lo = std::max(int64_t(0), std::min(r.lo, static_cast<int64_t>(data.size())));
+            r.hi = std::max(r.lo, std::min(r.hi, static_cast<int64_t>(data.size())));
             auto* p = std::lower_bound(
                 data.data() + r.lo, data.data() + r.hi, key);
             found = (p != data.data() + r.hi && *p == key);
@@ -136,6 +176,7 @@ int main(int argc, char** argv) {
     std::string workload     = get_arg(argc, argv, "--workload",      "balanced");
     size_t      sample_rate  = std::stoull(get_arg(argc, argv, "--sample-rate","100"));
     std::string exp_id       = get_arg(argc, argv, "--exp-id",        "dynamic");
+    std::string dataset      = get_arg(argc, argv, "--dataset",       "");
     (void)threads;
 
     // Workload drives insert_ratio when explicitly set.
@@ -149,15 +190,34 @@ int main(int argc, char** argv) {
     pla::PlaOptions opts;
     opts.threads = static_cast<unsigned>(1); // NaiveDynamic is single-threaded
 
-    // ── Generate initial dataset (50 % of n_keys) ────────────────────────────
+    // ── Generate or load initial dataset (50 % of n_keys) ────────────────────
     std::mt19937_64 rng(42);
+    std::vector<uint64_t> insert_stream;
+    std::string ds_label;
+
     size_t n_initial = n / 2;
-    std::vector<uint64_t> init_keys(n_initial);
-    for (auto& k : init_keys) k = rng();
-    std::sort(init_keys.begin(), init_keys.end());
-    // Deduplicate initial keys.
-    init_keys.erase(std::unique(init_keys.begin(), init_keys.end()),
-                    init_keys.end());
+    std::vector<uint64_t> init_keys;
+
+    if (!dataset.empty()) {
+        auto all_keys = load_binary(dataset);
+        std::sort(all_keys.begin(), all_keys.end());
+        all_keys.erase(std::unique(all_keys.begin(), all_keys.end()), all_keys.end());
+        size_t n_total = all_keys.size();
+        n_initial = std::min(n_initial, n_total / 2);
+        init_keys.assign(all_keys.begin(), all_keys.begin() + static_cast<long>(n_initial));
+        insert_stream.assign(all_keys.begin() + static_cast<long>(n_initial), all_keys.end());
+        n = n_total;
+        ds_label = dataset;
+    } else {
+        init_keys.resize(n_initial);
+        for (auto& k : init_keys) k = rng();
+        std::sort(init_keys.begin(), init_keys.end());
+        init_keys.erase(std::unique(init_keys.begin(), init_keys.end()), init_keys.end());
+        ds_label = "synth_uniform_" + std::to_string(n);
+    }
+    n_initial = init_keys.size();
+
+    size_t rss_before = get_rss_mb();
 
     NaiveDynamic dyn(epsilon, algo, opts, sample_rate);
 
@@ -175,21 +235,38 @@ int main(int argc, char** argv) {
     auto t0 = Clock::now();
 
     size_t ins_done = 0, look_done = 0;
+    double total_lookup_ns = 0.0;
+
     for (size_t op = 0; op < n_ops; ++op) {
-        uint64_t key = rng();
+        uint64_t key;
+        if (!insert_stream.empty() && ins_done < insert_stream.size())
+            key = insert_stream[ins_done % insert_stream.size()];
+        else
+            key = rng();
+
         bool do_insert = (ins_done < n_insert) &&
                          (look_done >= n_lookup || (op % 2 == 0));
         if (do_insert) {
             dyn.insert(key);
             ++ins_done;
         } else if (look_done < n_lookup) {
+            auto lt0 = Clock::now();
             sink ^= dyn.lookup(key) ? 1 : 0;
+            total_lookup_ns += Ns(Clock::now() - lt0).count();
             ++look_done;
         }
     }
 
+    size_t rss_after = get_rss_mb();
+    int64_t rss_mb = static_cast<int64_t>(rss_after) - static_cast<int64_t>(rss_before);
+
     double elapsed_ms = Ms(Clock::now() - t0).count();
-    double ops_s      = n_ops / (elapsed_ms / 1000.0);
+    // ops_s: combined throughput over total wall-clock (includes inserts + retrains).
+    double ops_s = n_ops / (elapsed_ms / 1000.0);
+    // lookup_ops_s: lookup-only throughput, excluding insert and retrain cost.
+    double lookup_ops_s = (look_done > 0 && total_lookup_ns > 0)
+                        ? (look_done / (total_lookup_ns / 1e9))
+                        : 0.0;
     (void)sink;
 
     // ── Latency percentiles ────────────────────────────────────────────────────
@@ -216,7 +293,7 @@ int main(int argc, char** argv) {
         << "\"pla\":\""               << algo_s         << "\","
         << "\"epsilon\":"             << epsilon        << ","
         << "\"threads\":"             << 1              << ","
-        << "\"dataset\":\"synth_uniform_" << n          << "\","
+        << "\"dataset\":\""          << ds_label      << "\","
         << "\"workload\":\""          << wl_label       << "\","
         << "\"build_ms\":"            << build_ms       << ","
         << "\"retrain_ms\":"          << dyn.retrain_ms_total << ","
@@ -226,12 +303,21 @@ int main(int argc, char** argv) {
         << "\"retrain_window_p99_ns\":"<< retrain_window_p99 << ","
         << "\"seg_cnt\":"             << dyn.index.segments.size() << ","
         << "\"bytes_index\":"         << dyn.index.bytes()         << ","
+        << "\"n_insert\":"            << ins_done       << ","
+        << "\"n_lookup\":"            << look_done      << ","
+        // ops_s: all ops / total wall-clock (includes insert O(n) and retrain cost).
         << "\"ops_s\":"               << ops_s          << ","
+        // lookup_ops_s: pure lookup throughput, uncontaminated by insert/retrain time.
+        << "\"lookup_ops_s\":"        << lookup_ops_s   << ","
         << "\"p50_ns\":"              << p50            << ","
         << "\"p95_ns\":"              << p95            << ","
         << "\"p99_ns\":"              << p99            << ","
-        << "\"cache_misses\":0,\"branches\":0,\"branch_misses\":0,"
-        << "\"instructions\":0,\"cycles\":0,\"rss_mb\":0,"
+        << "\"cache_misses\":"   << dyn.hw_cache << ","
+        << "\"branches\":0,"
+        << "\"branch_misses\":"  << dyn.hw_brmiss << ","
+        << "\"instructions\":"   << dyn.hw_instr  << ","
+        << "\"cycles\":"         << dyn.hw_cycles << ","
+        << "\"rss_mb\":"        << rss_mb        << ","
         << "\"fetch_strategy\":-1,\"io_pages\":0"
         << "}\n";
     return 0;

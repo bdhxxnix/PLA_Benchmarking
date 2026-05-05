@@ -75,6 +75,7 @@ set(SOSD_INCLUDE   "${CMAKE_SOURCE_DIR}/third_party/SOSD")
 add_library(pla_lib INTERFACE)
 target_include_directories(pla_lib INTERFACE
   "${CMAKE_SOURCE_DIR}/pla/include"
+  "${CMAKE_SOURCE_DIR}/bench"
   "${PGM_INCLUDE}"
   "${FITING_INCLUDE}"
 )

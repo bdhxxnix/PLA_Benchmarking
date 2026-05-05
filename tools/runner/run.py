@@ -31,7 +31,7 @@ from typing import List, Dict, Any
 
 import yaml  # pip install pyyaml
 
-# ── repo root (two levels up from this file) ─────────────────────────────────
+# ── repo root (three levels up from this file: tools/runner/run.py) ──────────
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 BUILD_DIR  = REPO_ROOT / "build"
 RESULTS_RAW = REPO_ROOT / "results" / "raw"
@@ -161,6 +161,14 @@ def build_cmd(case: Dict[str, Any]) -> List[str]:
     if case.get("target_rp") and float(case["target_rp"]) > 0:
         cmd += ["--target-rp", str(case["target_rp"])]
 
+    # --compress: G4 parameter compression (ondisk)
+    if str(case.get("compress", "false")).lower() in ("true", "1", "yes"):
+        cmd += ["--compress"]
+
+    # --direct-io: O_DIRECT I/O (ondisk)
+    if str(case.get("direct_io", "false")).lower() in ("true", "1", "yes"):
+        cmd += ["--direct-io"]
+
     # --insert-ratio: explicit insert fraction (dynamic DW-A/B)
     if case.get("insert_ratio") is not None:
         cmd += ["--insert-ratio", str(case["insert_ratio"])]
@@ -269,16 +277,32 @@ def run_case(case: Dict[str, Any], dry_run: bool = False) -> bool:
 
 def main():
     ap = argparse.ArgumentParser(description="pla-learned-index-bench runner")
-    ap.add_argument("--config",  required=True, help="Path to YAML experiment config")
+    ap.add_argument("config", nargs="?", help="Path to YAML experiment config (positional)")
+    ap.add_argument("--config",  dest="config_flag", help="Path to YAML experiment config (flag form)")
     ap.add_argument("--smoke",   action="store_true", help="Quick smoke run (tiny data)")
     ap.add_argument("--dry-run", action="store_true", help="Print commands without executing")
     ap.add_argument("--no-build", action="store_true", help="Skip cmake build step")
     ap.add_argument("--jobs",    type=int, default=os.cpu_count() or 4)
     ap.add_argument("--filter-scenario", help="Only run this scenario")
     ap.add_argument("--filter-pla",      help="Only run this PLA algo")
+    ap.add_argument("--results-dir", help="Override results root directory (default: <repo>/results)")
     args = ap.parse_args()
 
-    cfg   = load_config(Path(args.config))
+    # Accept config as positional or --config flag.
+    config_path = args.config_flag or args.config
+    if not config_path:
+        ap.error("config path is required (positional or --config)")
+
+    # Allow overriding the results directory (useful when invoking from a
+    # different working directory, which would otherwise silently write to the
+    # wrong location).
+    global RESULTS_RAW, RESULTS_AGG
+    if args.results_dir:
+        results_root = Path(args.results_dir)
+        RESULTS_RAW = results_root / "raw"
+        RESULTS_AGG = results_root / "agg"
+
+    cfg   = load_config(Path(config_path))
     cases = expand_matrix(cfg, smoke=args.smoke)
 
     # Apply filters.
@@ -288,7 +312,7 @@ def main():
         cases = [c for c in cases if c["pla"] == args.filter_pla]
 
     print(f"Experiment: {cfg.get('exp_name','?')}  ({len(cases)} cases)")
-    start_ts = datetime.datetime.utcnow().isoformat() + "Z"
+    start_ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
     # Group cases by PLA algo to minimise rebuilds.
     from collections import defaultdict

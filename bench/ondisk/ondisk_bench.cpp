@@ -44,6 +44,9 @@
 #include <unistd.h>
 #include <vector>
 
+#include "perf_counters.h"
+#include "rss.h"
+
 using Clock = std::chrono::steady_clock;
 using Ns    = std::chrono::duration<double, std::nano>;
 using Ms    = std::chrono::duration<double, std::milli>;
@@ -120,10 +123,48 @@ struct DiskFile {
     }
 };
 
+// ─── Direct I/O file abstraction ───────────────────────────────────────────────
+// Bypasses OS page cache using O_DIRECT. Requires 512-byte aligned buffers.
+struct DirectIOFile {
+    int      fd       = -1;
+    size_t   file_sz  = 0;
+    mutable uint8_t* read_buf = nullptr;
+    size_t   buf_sz   = 0;
+
+    bool open(const std::string& path) {
+        fd = ::open(path.c_str(), O_DIRECT | O_RDONLY);
+        if (fd < 0) return false;
+        struct stat st;
+        if (::fstat(fd, &st) < 0) { ::close(fd); fd = -1; return false; }
+        file_sz = static_cast<size_t>(st.st_size);
+        buf_sz  = PAGE_BYTES;
+        if (::posix_memalign(reinterpret_cast<void**>(&read_buf), 512, buf_sz) != 0) {
+            ::close(fd); fd = -1; return false;
+        }
+        return true;
+    }
+
+    void touch_page(size_t byte_off) const {
+        size_t pg = (byte_off / PAGE_BYTES) * PAGE_BYTES;
+        if (pg < file_sz)
+            ::pread(fd, read_buf, PAGE_BYTES, static_cast<off_t>(pg));
+    }
+
+    void close_file() {
+        if (read_buf) { ::free(read_buf); read_buf = nullptr; }
+        if (fd >= 0) { ::close(fd); fd = -1; }
+    }
+
+    ~DirectIOFile() { close_file(); }
+};
+
 // ─── Page fetch strategies (G1) ──────────────────────────────────────────────
-static size_t fetch_pages(const DiskFile& df,
+// Template: works with both DiskFile (mmap) and DirectIOFile (O_DIRECT).
+template<typename FileT>
+static size_t fetch_pages(const FileT& df,
                            const pla::SearchRange& range,
-                           int strategy) {
+                           int strategy,
+                           const uint8_t* mmap_ptr = nullptr) {
     size_t byte_lo = static_cast<size_t>(range.lo) * KEY_BYTES;
     size_t byte_hi = static_cast<size_t>(range.hi) * KEY_BYTES;
     byte_hi = std::min(byte_hi, df.file_sz);
@@ -136,11 +177,14 @@ static size_t fetch_pages(const DiskFile& df,
             for (size_t p = 0; p < n_pages; ++p)
                 df.touch_page(byte_lo + p * PAGE_BYTES);
             break;
-        case 1: // all-at-once with madvise WILLNEED
-            ::madvise(df.ptr + byte_lo, byte_hi - byte_lo, MADV_WILLNEED);
+        case 1: { // all-at-once (madvise for mmap, sequential touch for O_DIRECT)
+            if (mmap_ptr)
+                ::madvise(const_cast<uint8_t*>(mmap_ptr) + byte_lo,
+                          byte_hi - byte_lo, MADV_WILLNEED);
             for (size_t off = byte_lo; off < byte_hi; off += PAGE_BYTES)
                 df.touch_page(off);
             break;
+        }
         case 2: { // all-at-once sorted (dedup page list)
             std::vector<size_t> pages;
             pages.reserve(n_pages);
@@ -264,25 +308,51 @@ int main(int argc, char** argv) {
     bool        page_align     = has_flag(argc, argv, "--page-align");
     double      target_rp      = std::stod(get_arg(argc, argv, "--target-rp",          "0"));
     size_t      n_synth        = std::stoull(get_arg(argc, argv, "--n",        "1000000"));
+    bool        compress       = has_flag(argc, argv, "--compress");
+    bool        direct_io      = has_flag(argc, argv, "--direct-io");
     (void)threads;
 
     // ── Load or generate keys ─────────────────────────────────────────────────
     std::vector<uint64_t> synth_keys;
-    DiskFile df;
+    std::vector<uint64_t> key_buf;  // O_DIRECT: keys loaded into memory for binary search
+    DiskFile mmap_df;
+    DirectIOFile dio_df;
     const uint64_t* keys = nullptr;
     size_t n = 0;
     std::string ds_label;
+    bool have_mmap = false;
 
     if (!dataset.empty()) {
-        if (!df.open(dataset)) {
-            std::cerr << "Failed to open dataset: " << dataset << "\n";
-            return 1;
+        if (direct_io) {
+            if (!dio_df.open(dataset)) {
+                std::cerr << "Failed to open dataset with O_DIRECT: " << dataset << "\n";
+                return 1;
+            }
+            // Load keys via normal read (O_DIRECT is only for page-touch ops).
+            n = dio_df.file_sz / KEY_BYTES;
+            key_buf.resize(n);
+            {
+                int kfd = ::open(dataset.c_str(), O_RDONLY);
+                if (kfd < 0) { std::cerr << "Failed to open dataset for key load\n"; return 1; }
+                ssize_t rd = ::read(kfd, key_buf.data(), dio_df.file_sz);
+                ::close(kfd);
+                if (rd != static_cast<ssize_t>(dio_df.file_sz)) {
+                    std::cerr << "Key load read failed\n"; return 1;
+                }
+            }
+            keys = key_buf.data();
+            ds_label = dataset;
+        } else {
+            if (!mmap_df.open(dataset)) {
+                std::cerr << "Failed to open dataset: " << dataset << "\n";
+                return 1;
+            }
+            n      = mmap_df.file_sz / KEY_BYTES;
+            keys   = reinterpret_cast<const uint64_t*>(mmap_df.ptr);
+            ds_label = dataset;
+            have_mmap = true;
         }
-        n      = df.file_sz / KEY_BYTES;
-        keys   = reinterpret_cast<const uint64_t*>(df.ptr);
-        ds_label = dataset;
     } else {
-        // Synthetic fallback (in-memory; page semantics emulated via pointer).
         if (dist_s == "lognormal") synth_keys = gen_lognormal(n_synth);
         else                       synth_keys = gen_uniform(n_synth);
         n      = synth_keys.size();
@@ -291,6 +361,27 @@ int main(int argc, char** argv) {
     }
 
     if (n == 0) { std::cerr << "Empty dataset\n"; return 1; }
+
+    // Warn when using synthetic in-memory data: without a real disk file and
+    // a cold page cache, all fetch strategies touch hot RAM and produce
+    // identical latency.  Pass a real --dataset file for meaningful G1 results.
+    if (dataset.empty()) {
+        std::cerr << "[WARN] ondisk_bench: no --dataset file supplied; using in-memory "
+                     "synthetic data.  Fetch-strategy comparison requires a real on-disk "
+                     "file with a cold page cache (run scripts/drop_caches.sh first).\n";
+    }
+
+    // Warn when epsilon is too small for fetch-strategy differences to manifest.
+    // With PAGE_BYTES=4096 and KEY_BYTES=8, a range of (2*epsilon+2) items fits
+    // in one page when 2*epsilon+2 <= 512, i.e. epsilon <= 255.  Below that,
+    // io_pages_mean will always be 1 and all strategies are indistinguishable.
+    if (epsilon <= 255) {
+        std::cerr << "[WARN] ondisk_bench: epsilon=" << epsilon
+                  << " produces a search range of " << (2*epsilon+2)
+                  << " items (" << (2*epsilon+2)*KEY_BYTES << " bytes) which fits in "
+                     "1 page (4096 bytes).  Fetch strategies will all report "
+                     "io_pages_mean=1.  Use epsilon >= 256 to see multi-page I/O.\n";
+    }
 
     pla::PlaAlgo    algo = pla::algo_from_string(algo_s);
     pla::PlaOptions opts; opts.threads = 1;
@@ -312,6 +403,13 @@ int main(int argc, char** argv) {
     }
 
     // ── Build PLA index ───────────────────────────────────────────────────────
+    size_t rss_before = get_rss_mb();
+
+    PerfCounters perf;
+    perf.open_all();
+    perf.reset();
+    perf.enable();
+
     auto t_build0 = Clock::now();
     pla::PlaResult index;
     PageLevelIndex page_idx;
@@ -325,9 +423,22 @@ int main(int argc, char** argv) {
     }
     double build_ms = Ms(Clock::now() - t_build0).count();
 
+    perf.disable();
+    size_t rss_after = get_rss_mb();
+    int64_t rss_mb    = static_cast<int64_t>(rss_after) - static_cast<int64_t>(rss_before);
+    int64_t hw_cache  = perf.cache_misses();
+    int64_t hw_instr  = perf.instructions();
+    int64_t hw_cycles = perf.cycles();
+    int64_t hw_brmiss = perf.branch_misses();
+
+    // G4: compressed index size (float slope+intercept vs double = 48→40 bytes/segment).
+    size_t bytes_compressed = compress
+        ? index.segments.size() * (sizeof(pla::Segment) - 2 * sizeof(double) + 2 * sizeof(float))
+        : index.bytes();
+
     // Drop mmap hints to simulate cold cache (best-effort without root).
-    if (df.ptr && df.ptr != MAP_FAILED)
-        ::madvise(df.ptr, df.file_sz, MADV_DONTNEED);
+    if (!direct_io && have_mmap && mmap_df.ptr && mmap_df.ptr != MAP_FAILED)
+        ::madvise(mmap_df.ptr, mmap_df.file_sz, MADV_DONTNEED);
 
     // ── Generate queries ──────────────────────────────────────────────────────
     std::mt19937_64 rng_q(42);
@@ -392,8 +503,10 @@ int main(int argc, char** argv) {
 
         // Touch pages (G1 fetch strategy).
         size_t pages_touched = 0;
-        if (df.ptr) {
-            pages_touched = fetch_pages(df, range, fetch_strategy);
+        if (direct_io) {
+            pages_touched = fetch_pages(dio_df, range, fetch_strategy, nullptr);
+        } else if (have_mmap) {
+            pages_touched = fetch_pages(mmap_df, range, fetch_strategy, mmap_df.ptr);
         } else {
             // In-memory emulation: count pages of the search range.
             size_t span = static_cast<size_t>(range.hi - range.lo) * KEY_BYTES;
@@ -461,6 +574,9 @@ int main(int argc, char** argv) {
         << "\"build_ms\":"         << build_ms         << ","
         << "\"seg_cnt\":"          << index.segments.size() << ","
         << "\"bytes_index\":"      << index.bytes()         << ","
+        << "\"compress\":"         << (compress ? "true" : "false") << ","
+        << "\"bytes_compressed\":" << bytes_compressed     << ","
+        << "\"direct_io\":"        << (direct_io ? "true" : "false") << ","
         << "\"ops_s\":"            << ops_s            << ","
         << "\"p50_ns\":"           << pct_lat(50)      << ","
         << "\"p95_ns\":"           << pct_lat(95)      << ","
@@ -470,8 +586,12 @@ int main(int argc, char** argv) {
         << "\"io_pages_p50\":"     << io_pages_p50     << ","
         << "\"io_pages_p95\":"     << io_pages_p95     << ","
         << "\"io_pages_p99\":"     << io_pages_p99     << ","
-        << "\"cache_misses\":0,\"branches\":0,\"branch_misses\":0,"
-        << "\"instructions\":0,\"cycles\":0,\"rss_mb\":0"
+        << "\"cache_misses\":"    << hw_cache        << ","
+        << "\"branches\":0,"
+        << "\"branch_misses\":"   << hw_brmiss       << ","
+        << "\"instructions\":"    << hw_instr        << ","
+        << "\"cycles\":"          << hw_cycles       << ","
+        << "\"rss_mb\":"          << rss_mb
         << "}\n";
     return 0;
 }

@@ -258,7 +258,7 @@ def plot_seg_len_distribution(rows: List[Dict], out_dir: Path):
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
     for ax, metric, label in zip(axes,
                                   ["seg_len_mean", "seg_len_p95"],
-                                  ["Mean key span", "p95 key span"]):
+                                  ["Mean keys/segment (rank span)", "p95 keys/segment (rank span)"]):
         for pla, prows in group_by(pla_only, "pla").items():
             pts = sorted((r["epsilon"], float(r.get(metric, 0)))
                          for r in prows
@@ -269,7 +269,7 @@ def plot_seg_len_distribution(rows: List[Dict], out_dir: Path):
                 ax.plot(xs, ys, marker="o", label=pla, color=pla_color(pla))
         ax.set_title(f"IM-A: ε vs {label}")
         ax.set_xlabel("ε (epsilon)")
-        ax.set_ylabel(label)
+        ax.set_ylabel("Keys per segment (rank span)")
         ax.legend()
         ax.grid(True, alpha=0.3)
     plt.tight_layout()

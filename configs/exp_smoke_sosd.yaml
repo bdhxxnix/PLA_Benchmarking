@@ -1,0 +1,18 @@
+exp_name: smoke_sosd
+
+# Quick smoke test using a tiny 1M subset extracted from the SOSD Facebook dataset.
+# Dataset: data/sosd_fb_1M (first 1M keys from SOSD fb_200M_uint64)
+
+matrix:
+  scenario:       [pla_only, inmem]
+  pla:            [optimal, swing, greedy]
+  epsilon:        [32, 128]
+  threads:        [1]
+  dataset:        [sosd_fb_1M]
+  workload:       [readonly]
+  fetch_strategy: [0]
+
+n_keys:  1000000
+queries: 100000
+
+extra_flags: {}

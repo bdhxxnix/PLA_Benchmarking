@@ -1,25 +1,23 @@
 #!/usr/bin/env bash
 # run_experiments.sh — Configurable experiment runner for pla-learned-index-bench
 #
-# Usage:
-#   ./run_experiments.sh                          # run all experiments, all PLAs
-#   ./run_experiments.sh --experiments IM-A,IM-B  # only IM-A and IM-B
+# Quick examples:
+#   ./run_experiments.sh                                    # smoke scale, all experiments
+#   ./run_experiments.sh --scale full                       # full datasets (200M+)
+#   ./run_experiments.sh --scale medium --experiments IM-A,IM-B
 #   ./run_experiments.sh --experiments OD-C --plas swing,greedy
-#   ./run_experiments.sh --n 1000000 --queries 1000000  # full scale
-#   ./run_experiments.sh --dry-run                 # print commands, don't execute
-#   ./run_experiments.sh --list                    # list all experiment codes
+#   ./run_experiments.sh --dry-run                          # print commands only
+#   ./run_experiments.sh --list                             # list experiment codes
 #
-# Experiment codes:
-#   IM-A   PLA-only iso-epsilon baseline
-#   IM-B   In-memory routing comparison (PGM-index vs FITing-Tree)
-#   DW-A   Dynamic retrain cost (write-heavy, 90% inserts)
-#   DW-B   Dynamic workload sweep (readonly/balanced/write_heavy)
-#   OD-A   On-disk iso-epsilon + iso-RP
-#   OD-B   On-disk fixed G1/G2/G3 + G4 compression
-#   OD-C   On-disk G1 fetch strategy × PLA
-#   OD-D   On-disk G2 granularity × PLA
-#   OD-E   On-disk G3 page-alignment × PLA
-#   OD-F   On-disk hybrid update workload
+# Scale presets (--scale):
+#   smoke   100K keys, 100K queries — quick verification (default)
+#   medium  1M keys, 1M queries — representative
+#   full    auto-detect from dataset, 10M queries — production
+#
+# Full-scale examples:
+#   ./run_experiments.sh --scale full --dataset ~/Projects/Datasets/SOSD/fb_200M_uint64
+#   ./run_experiments.sh --scale full --dataset ~/Projects/Datasets/SOSD/osm_800M_uint64_unique \
+#       --experiments OD-A,OD-B --plas optimal
 
 set -euo pipefail
 
@@ -27,18 +25,27 @@ set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_DIR="$REPO/build"
 RESULTS_DIR="$REPO/results/raw"
+
+SCALE="smoke"
 N_KEYS=100000
 QUERIES=100000
 DIST_UNIFORM="uniform"
 DIST_LOGNORMAL="lognormal"
-DATASET="$REPO/data/sosd_fb_1M_sorted"      # for on-disk benchmarks
-DYN_DATASET="$REPO/data/sosd_fb_1M"          # for dynamic benchmarks
+
+# Dataset paths — overridden by --scale and --dataset / --dyn-dataset.
+USER_DATASET=""
+USER_DYN_DATASET=""
+DATASET="$REPO/data/sosd_fb_1M_sorted"
+DYN_DATASET="$REPO/data/sosd_fb_1M"
+STRIP_HEADER=true          # auto-strip SOSD header for on-disk use
+
 THREADS=1
 EXPERIMENTS="all"
 PLAS="all"
 DRY_RUN=false
 NO_BUILD=false
 COLD_CACHE=false
+
 EPS_IMA="32 64 128 256 512"
 EPS_IMB="32 64 128 256"
 EPS_DWA="32 64 128 256 512"
@@ -50,15 +57,65 @@ EPS_ODD="4 32 128 256"
 EPS_ODE="32 128 512"
 EPS_ODF="64 128 256"
 
+# ─── Helpers ─────────────────────────────────────────────────────────────────────
+filesize_to_n() {
+  # Return number of uint64 keys in a binary file.
+  local f="$1"
+  [[ -f "$f" ]] || { echo 0; return; }
+  stat -c%s "$f" 2>/dev/null | awk '{print int($1 / 8)}'
+}
+
+prepare_ondisk_dataset() {
+  # If the dataset has a leading value that breaks monotonicity (SOSD quirk),
+  # create a header-stripped copy in /dev/shm for fast mmap access.
+  local src="$1"
+  local dst="$2"
+
+  if [[ -f "$dst" ]] && [[ "$(filesize_to_n "$dst")" -gt 0 ]]; then
+    echo "$dst"
+    return
+  fi
+
+  # Check if the first two values are out of order (SOSD header).
+  local first_two
+  first_two=$(od -A n -t u8 -N 16 "$src" 2>/dev/null | awk '{print $1, $2}')
+  local v1 v2
+  v1=$(echo "$first_two" | awk '{print $1}')
+  v2=$(echo "$first_two" | awk '{print $2}')
+
+  if [[ "$v1" -gt "$v2" ]] && [[ "$v2" -gt 0 ]]; then
+    echo "  [strip-header] Removing unsorted leading value from $(basename "$src")" >&2
+    mkdir -p "$(dirname "$dst")"
+    dd if="$src" of="$dst" bs=8 skip=1 status=none 2>/dev/null
+    echo "$dst"
+  else
+    # Dataset is already sorted — use directly.
+    echo "$src"
+  fi
+}
+
 # ─── Parse args ─────────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --scale)
+      SCALE="$2"
+      case "$SCALE" in
+        smoke)
+          N_KEYS=100000;   QUERIES=100000 ;;
+        medium)
+          N_KEYS=1000000;  QUERIES=1000000 ;;
+        full)
+          N_KEYS=0;        QUERIES=10000000 ;;  # 0 = auto-detect from dataset
+        *) echo "Unknown scale: $SCALE (use smoke|medium|full)"; exit 1 ;;
+      esac
+      shift 2 ;;
     --experiments) EXPERIMENTS="$2"; shift 2 ;;
     --plas)        PLAS="$2";        shift 2 ;;
     --n)           N_KEYS="$2";      shift 2 ;;
     --queries)     QUERIES="$2";     shift 2 ;;
-    --dataset)     DATASET="$2";     shift 2 ;;
-    --dyn-dataset) DYN_DATASET="$2"; shift 2 ;;
+    --dataset)     USER_DATASET="$2"; shift 2 ;;
+    --dyn-dataset) USER_DYN_DATASET="$2"; shift 2 ;;
+    --no-strip)    STRIP_HEADER=false; shift ;;
     --threads)     THREADS="$2";     shift 2 ;;
     --output-dir)  RESULTS_DIR="$2"; shift 2 ;;
     --eps-ima)     EPS_IMA="$2";     shift 2 ;;
@@ -91,32 +148,80 @@ while [[ $# -gt 0 ]]; do
     --help|-h)
       echo "Usage: $0 [options]"
       echo ""
-      echo "Experiment selection:"
-      echo "  --experiments IM-A,IM-B,...   Comma-separated list or 'all' (default: all)"
-      echo "  --plas optimal,swing,greedy   Comma-separated list or 'all' (default: all)"
-      echo "  --list                        List all experiment codes"
+      echo "=== Scale presets ==="
+      echo "  --scale smoke|medium|full   (default: smoke)"
+      echo "    smoke   100K keys, 100K queries"
+      echo "    medium  1M keys, 1M queries"
+      echo "    full    auto-detect from dataset, 10M queries"
       echo ""
-      echo "Data parameters:"
-      echo "  --n N              Number of keys (default: 100000)"
-      echo "  --queries Q        Number of queries (default: 100000)"
-      echo "  --dataset PATH     On-disk dataset path (default: data/sosd_fb_1M_sorted)"
-      echo "  --dyn-dataset PATH Dynamic dataset path (default: data/sosd_fb_1M)"
+      echo "=== Dataset paths ==="
+      echo "  --dataset PATH     On-disk benchmark dataset"
+      echo "  --dyn-dataset PATH Dynamic benchmark dataset"
+      echo "  --no-strip         Don't auto-strip SOSD header for on-disk"
+      echo ""
+      echo "  Defaults (smoke/medium): data/sosd_fb_1M(_sorted)"
+      echo "  For --scale full, point at real datasets:"
+      echo "    --dataset ~/Projects/Datasets/SOSD/fb_200M_uint64"
+      echo "    --dataset ~/Projects/Datasets/SOSD/osm_800M_uint64_unique"
+      echo "  The script auto-detects and strips the SOSD header for on-disk use."
+      echo ""
+      echo "=== Experiment selection ==="
+      echo "  --experiments IM-A,IM-B,...  Comma-separated or 'all' (default: all)"
+      echo "  --plas optimal,swing,greedy  Comma-separated or 'all' (default: all)"
+      echo "  --list                       List all experiment codes"
+      echo ""
+      echo "=== Data parameters ==="
+      echo "  --n N              Override number of keys (0=auto from dataset)"
+      echo "  --queries Q        Number of queries"
       echo "  --threads T        Thread count (default: 1)"
       echo ""
-      echo "Epsilon overrides (space-separated):"
-      echo "  --eps-ima \"8 32 128 512\"    Override IM-A epsilons"
-      echo "  --eps-imb \"...\"             Override IM-B epsilons"
-      echo "  ... (same pattern for --eps-dwa through --eps-odf)"
+      echo "=== Epsilon overrides (space-separated) ==="
+      echo "  --eps-ima \"...\" --eps-imb \"...\" --eps-dwa \"...\""
+      echo "  --eps-dwb \"...\" --eps-oda \"...\" --eps-odb \"...\""
+      echo "  --eps-odc \"...\" --eps-odd \"...\" --eps-ode \"...\" --eps-odf \"...\""
       echo ""
-      echo "Execution control:"
+      echo "=== Execution control ==="
       echo "  --dry-run          Print commands without executing"
       echo "  --no-build         Skip cmake rebuilds"
       echo "  --cold-cache       Run drop_caches.sh before each on-disk run (needs sudo)"
       echo "  --output-dir DIR   Results directory (default: results/raw)"
+      echo ""
+      echo "=== Full-scale examples ==="
+      echo "  # Facebook 200M"
+      echo "  $0 --scale full --dataset ~/Projects/Datasets/SOSD/fb_200M_uint64"
+      echo ""
+      echo "  # OSM 800M — on-disk only, optimal PLA"
+      echo "  $0 --scale full --dataset ~/Projects/Datasets/SOSD/osm_800M_uint64_unique \\"
+      echo "      --experiments OD-A,OD-B,OD-C --plas optimal"
+      echo ""
+      echo "  # In-memory only — no header issue, use dataset directly"
+      echo "  $0 --scale full --dyn-dataset ~/Projects/Datasets/SOSD/fb_200M_uint64 \\"
+      echo "      --experiments IM-A,IM-B,DW-A --n 200000000"
       exit 0 ;;
     *) echo "Unknown: $1 (use --help)"; exit 1 ;;
   esac
 done
+
+# ─── Resolve datasets for scale ─────────────────────────────────────────────────
+if [[ "$SCALE" == "full" ]]; then
+  if [[ -n "$USER_DATASET" ]]; then
+    DATASET="$USER_DATASET"
+  fi
+  if [[ -n "$USER_DYN_DATASET" ]]; then
+    DYN_DATASET="$USER_DYN_DATASET"
+  fi
+  if [[ "$N_KEYS" -eq 0 ]]; then
+    N_KEYS=$(filesize_to_n "$DATASET")
+  fi
+elif [[ -n "$USER_DATASET" ]]; then
+  DATASET="$USER_DATASET"
+fi
+[[ -n "$USER_DYN_DATASET" ]] && DYN_DATASET="$USER_DYN_DATASET"
+
+# ─── Prepare on-disk dataset (strip SOSD header if needed) ──────────────────────
+if $STRIP_HEADER && [[ -f "$DATASET" ]]; then
+  DATASET=$(prepare_ondisk_dataset "$DATASET" "$REPO/data/sosd_ondisk_stripped.bin")
+fi
 
 # ─── Resolve experiment list ────────────────────────────────────────────────────
 ALL_EXPS=(IM-A IM-B DW-A DW-B OD-A OD-B OD-C OD-D OD-E OD-F)
@@ -165,12 +270,15 @@ build_pla() {
 echo "=============================================="
 echo " pla-learned-index-bench experiment runner"
 echo "=============================================="
+echo " Scale:       $SCALE"
 echo " Experiments: ${EXPS[*]}"
 echo " PLAs:        ${PLA_LIST[*]}"
 echo " N keys:      $N_KEYS"
 echo " N queries:   $QUERIES"
 echo " Threads:     $THREADS"
 echo " Dataset:     $DATASET"
+echo " Dyn dataset: $DYN_DATASET"
+echo " Strip hdr:   $STRIP_HEADER"
 echo " Dry run:     $DRY_RUN"
 echo " Cold cache:  $COLD_CACHE"
 echo " Results:     $RESULTS_DIR"
@@ -179,7 +287,7 @@ echo "=============================================="
 mkdir -p "$RESULTS_DIR"
 
 run_experiments() {
-  local -n _exps="$1"  # array of experiment codes active in this PLA iteration
+  local -n _exps="$1"
 
   for exp in "${_exps[@]}"; do
     echo ""
@@ -192,7 +300,6 @@ run_experiments() {
         for eps in $EPS_IMA; do
           for dist in $DIST_UNIFORM $DIST_LOGNORMAL; do
             local eid="IMA_${PLA}_e${eps}_${dist}"
-            cold_cache
             run_cmd "$BUILD_DIR/pla_build_bench" \
               --algo "$PLA" --epsilon "$eps" --dist "$dist" \
               --n "$N_KEYS" --threads "$THREADS" --exp-id "$eid" \
@@ -261,7 +368,6 @@ run_experiments() {
       # ── OD-B: Fixed G1/G2/G3 + G4 compression ──────────────────────────────
       OD-B)
         for eps in $EPS_ODB; do
-          # Without compression
           local eid="ODB_${PLA}_e${eps}"
           cold_cache
           run_cmd "$BUILD_DIR/ondisk_bench" \
@@ -269,7 +375,6 @@ run_experiments() {
             --dataset "$DATASET" --n "$N_KEYS" --queries "$QUERIES" \
             --exp-id "$eid" >> "$RESULTS_DIR/ondisk.jsonl"
           echo "    OK: $eid"
-          # With G4 compression
           local eid_c="ODB_${PLA}_e${eps}_comp"
           cold_cache
           run_cmd "$BUILD_DIR/ondisk_bench" \
@@ -314,7 +419,6 @@ run_experiments() {
       # ── OD-E: G3 Page-alignment × PLA ──────────────────────────────────────
       OD-E)
         for eps in $EPS_ODE; do
-          # Without page-align
           local eid="ODE_${PLA}_e${eps}_noalign"
           cold_cache
           run_cmd "$BUILD_DIR/ondisk_bench" \
@@ -322,7 +426,6 @@ run_experiments() {
             --dataset "$DATASET" --n "$N_KEYS" --queries "$QUERIES" \
             --exp-id "$eid" >> "$RESULTS_DIR/ondisk.jsonl"
           echo "    OK: $eid"
-          # With page-align
           local eid_a="ODE_${PLA}_e${eps}_align"
           cold_cache
           run_cmd "$BUILD_DIR/ondisk_bench" \
@@ -380,6 +483,7 @@ for f in "$RESULTS_DIR"/*.jsonl; do
   [[ -f "$f" ]] && echo "   $(basename "$f"): $(wc -l < "$f") rows"
 done
 echo ""
-echo " Aggregate: python3 tools/viz/aggregate.py $RESULTS_DIR/ results/agg/results.csv"
-echo " Plots:     python3 tools/viz/plots.py results/agg/results.csv results/agg/"
+echo " Post-process:"
+echo "   python3 tools/viz/aggregate.py $RESULTS_DIR/ results/agg/results.csv"
+echo "   python3 tools/viz/plots.py results/agg/results.csv results/agg/"
 echo "=============================================="

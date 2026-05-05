@@ -29,12 +29,8 @@ RESULTS_DIR="$REPO/results/raw"
 SCALE="smoke"
 N_KEYS=100000
 QUERIES=100000
-DIST_UNIFORM="uniform"
-DIST_LOGNORMAL="lognormal"
 
 # Dataset paths — overridden by --scale and --dataset / --dyn-dataset.
-USER_DATASET=""
-USER_DYN_DATASET=""
 DATASET="$REPO/data/sosd_fb_1M_sorted"
 DYN_DATASET="$REPO/data/sosd_fb_1M"
 STRIP_HEADER=true          # auto-strip SOSD header for on-disk use
@@ -113,8 +109,8 @@ while [[ $# -gt 0 ]]; do
     --plas)        PLAS="$2";        shift 2 ;;
     --n)           N_KEYS="$2";      shift 2 ;;
     --queries)     QUERIES="$2";     shift 2 ;;
-    --dataset)     USER_DATASET="$2"; shift 2 ;;
-    --dyn-dataset) USER_DYN_DATASET="$2"; shift 2 ;;
+    --dataset)     DATASET="$2";      shift 2 ;;
+    --dyn-dataset) DYN_DATASET="$2";   shift 2 ;;
     --no-strip)    STRIP_HEADER=false; shift ;;
     --threads)     THREADS="$2";     shift 2 ;;
     --output-dir)  RESULTS_DIR="$2"; shift 2 ;;
@@ -203,24 +199,13 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ─── Resolve datasets for scale ─────────────────────────────────────────────────
-if [[ "$SCALE" == "full" ]]; then
-  if [[ -n "$USER_DATASET" ]]; then
-    DATASET="$USER_DATASET"
-  fi
-  if [[ -n "$USER_DYN_DATASET" ]]; then
-    DYN_DATASET="$USER_DYN_DATASET"
-  fi
-  if [[ "$N_KEYS" -eq 0 ]]; then
-    N_KEYS=$(filesize_to_n "$DATASET")
-  fi
-elif [[ -n "$USER_DATASET" ]]; then
-  DATASET="$USER_DATASET"
+if [[ "$SCALE" == "full" ]] && [[ "$N_KEYS" -eq 0 ]]; then
+  N_KEYS=$(filesize_to_n "$DATASET")
 fi
-[[ -n "$USER_DYN_DATASET" ]] && DYN_DATASET="$USER_DYN_DATASET"
 
 # ─── Prepare on-disk dataset (strip SOSD header if needed) ──────────────────────
 if $STRIP_HEADER && [[ -f "$DATASET" ]]; then
-  DATASET=$(prepare_ondisk_dataset "$DATASET" "$REPO/data/sosd_ondisk_stripped.bin")
+  DATASET=$(prepare_ondisk_dataset "$DATASET" "$REPO/data/sosd_ondisk_$(basename "$DATASET")")
 fi
 
 # ─── Resolve experiment list ────────────────────────────────────────────────────
@@ -298,25 +283,40 @@ run_experiments() {
       # ── IM-A: PLA-only iso-epsilon ──────────────────────────────────────────
       IM-A)
         for eps in $EPS_IMA; do
-          for dist in $DIST_UNIFORM $DIST_LOGNORMAL; do
-            local eid="IMA_${PLA}_e${eps}_${dist}"
+          if [[ -f "$DATASET" ]]; then
+            local eid="IMA_${PLA}_e${eps}_$(basename "$DATASET")"
             run_cmd "$BUILD_DIR/pla_build_bench" \
-              --algo "$PLA" --epsilon "$eps" --dist "$dist" \
+              --algo "$PLA" --epsilon "$eps" --dataset "$DATASET" \
               --n "$N_KEYS" --threads "$THREADS" --exp-id "$eid" \
               >> "$RESULTS_DIR/pla_only.jsonl"
             echo "    OK: $eid"
-          done
+          else
+            for dist in uniform lognormal; do
+              local eid="IMA_${PLA}_e${eps}_${dist}"
+              run_cmd "$BUILD_DIR/pla_build_bench" \
+                --algo "$PLA" --epsilon "$eps" --dist "$dist" \
+                --n "$N_KEYS" --threads "$THREADS" --exp-id "$eid" \
+                >> "$RESULTS_DIR/pla_only.jsonl"
+              echo "    OK: $eid"
+            done
+          fi
         done
         ;;
 
       # ── IM-B: In-memory routing ─────────────────────────────────────────────
       IM-B)
+        local dist_or_dataset
+        if [[ -f "$DATASET" ]]; then
+          dist_or_dataset="--dataset $DATASET"
+        else
+          dist_or_dataset="--dist uniform"
+        fi
         for eps in $EPS_IMB; do
           for idx in fiting-tree pgm-index; do
             for wl in readonly balanced zipf; do
               local eid="IMB_${PLA}_e${eps}_${idx}_${wl}"
               run_cmd "$BUILD_DIR/lookup_bench" \
-                --algo "$PLA" --epsilon "$eps" --dist uniform \
+                --algo "$PLA" --epsilon "$eps" $dist_or_dataset \
                 --n "$N_KEYS" --queries "$QUERIES" --threads "$THREADS" \
                 --index "$idx" --workload "$wl" --exp-id "$eid" \
                 >> "$RESULTS_DIR/inmem.jsonl"
@@ -328,11 +328,14 @@ run_experiments() {
 
       # ── DW-A: Dynamic retrain cost ──────────────────────────────────────────
       DW-A)
+        local ds_flag=""
+        [[ -f "$DATASET" ]] && ds_flag="--dataset $DATASET"
+        [[ -z "$ds_flag" && -f "$DYN_DATASET" ]] && ds_flag="--dataset $DYN_DATASET"
         for eps in $EPS_DWA; do
           local eid="DWA_${PLA}_e${eps}"
           run_cmd "$BUILD_DIR/dynamic_bench" \
             --algo "$PLA" --epsilon "$eps" --workload write_heavy \
-            --n "$N_KEYS" --exp-id "$eid" \
+            --n "$N_KEYS" $ds_flag --exp-id "$eid" \
             >> "$RESULTS_DIR/dynamic.jsonl"
           echo "    OK: $eid"
         done
@@ -340,12 +343,15 @@ run_experiments() {
 
       # ── DW-B: Dynamic workload sweep ────────────────────────────────────────
       DW-B)
+        local ds_flag=""
+        [[ -f "$DATASET" ]] && ds_flag="--dataset $DATASET"
+        [[ -z "$ds_flag" && -f "$DYN_DATASET" ]] && ds_flag="--dataset $DYN_DATASET"
         for eps in $EPS_DWB; do
           for wl in readonly balanced write_heavy; do
             local eid="DWB_${PLA}_e${eps}_${wl}"
             run_cmd "$BUILD_DIR/dynamic_bench" \
               --algo "$PLA" --epsilon "$eps" --workload "$wl" \
-              --n "$N_KEYS" --exp-id "$eid" \
+              --n "$N_KEYS" $ds_flag --exp-id "$eid" \
               >> "$RESULTS_DIR/dynamic.jsonl"
             echo "    OK: $eid"
           done

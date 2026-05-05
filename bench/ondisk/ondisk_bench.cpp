@@ -436,9 +436,13 @@ int main(int argc, char** argv) {
         ? index.segments.size() * (sizeof(pla::Segment) - 2 * sizeof(double) + 2 * sizeof(float))
         : index.bytes();
 
-    // Drop mmap hints to simulate cold cache (best-effort without root).
-    if (!direct_io && have_mmap && mmap_df.ptr && mmap_df.ptr != MAP_FAILED)
-        ::madvise(mmap_df.ptr, mmap_df.file_sz, MADV_DONTNEED);
+    // Drop page cache hints to simulate cold cache (best-effort without root).
+    // posix_fadvise(DONTNEED) works on file-backed pages even without root,
+    // unlike madvise(DONTNEED) which requires CAP_SYS_ADMIN for file mappings.
+    if (!direct_io && have_mmap && mmap_df.fd >= 0)
+        ::posix_fadvise(mmap_df.fd, 0,
+                        static_cast<off_t>(mmap_df.file_sz),
+                        POSIX_FADV_DONTNEED);
 
     // ── Generate queries ──────────────────────────────────────────────────────
     std::mt19937_64 rng_q(42);

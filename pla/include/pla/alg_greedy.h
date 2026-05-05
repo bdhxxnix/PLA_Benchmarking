@@ -54,10 +54,10 @@ inline PlaResult build_greedy(
     double slope_hi =  std::numeric_limits<double>::infinity();
     int64_t seg_start_rank = 0;
 
-    auto emit = [&](int64_t last_rank, uint64_t next_key_lo) {
+    auto emit = [&](int64_t last_rank, uint64_t next_key_lo, bool is_final = false) {
         Segment s;
         s.key_lo    = static_cast<uint64_t>(x0);
-        s.key_hi    = (next_key_lo == 0)
+        s.key_hi    = is_final
                         ? std::numeric_limits<uint64_t>::max()
                         : next_key_lo - 1;
         double mid_slope = std::isfinite(slope_lo) && std::isfinite(slope_hi)
@@ -94,7 +94,7 @@ inline PlaResult build_greedy(
             if (xi == x0) {
                 // Duplicate of first key; just absorb (epsilon check).
                 if (std::abs(yi - y0) > static_cast<double>(epsilon)) {
-                    emit(static_cast<int64_t>(i) - 1, xi);
+                    emit(static_cast<int64_t>(i) - 1, xi, false);
                     reset(xi, static_cast<int64_t>(i));
                 }
                 continue;
@@ -122,7 +122,7 @@ inline PlaResult build_greedy(
             }
             if (slope_lo > slope_hi) {
                 // Shouldn't normally happen with ε>=1 and 2 distinct keys, but handle.
-                emit(static_cast<int64_t>(i) - 1, xi);
+                emit(static_cast<int64_t>(i) - 1, xi, false);
                 reset(xi, static_cast<int64_t>(i));
             }
             continue;
@@ -142,7 +142,7 @@ inline PlaResult build_greedy(
         double merged_hi = std::min(slope_hi, new_shi);
 
         if (merged_lo > merged_hi) {
-            emit(static_cast<int64_t>(i) - 1, xi);
+            emit(static_cast<int64_t>(i) - 1, xi, false);
             reset(xi, static_cast<int64_t>(i));
         } else {
             slope_lo = merged_lo;
@@ -151,7 +151,7 @@ inline PlaResult build_greedy(
     }
 
     // Emit last segment.
-    emit(static_cast<int64_t>(n) - 1, 0);
+    emit(static_cast<int64_t>(n) - 1, 0, true);
 
     auto t1 = std::chrono::steady_clock::now();
     result.build_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();

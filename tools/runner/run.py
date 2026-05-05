@@ -37,6 +37,23 @@ BUILD_DIR  = REPO_ROOT / "build"
 RESULTS_RAW = REPO_ROOT / "results" / "raw"
 RESULTS_AGG = REPO_ROOT / "results" / "agg"
 
+# ── Data directory search path ──────────────────────────────────────────────────
+_DATA_DIRS: List[str] = []
+
+
+def get_data_dirs() -> List[str]:
+    """Return the list of directories to search for dataset files."""
+    dirs: List[str] = []
+    # 1. Explicit --data-dir args (highest priority).
+    dirs.extend(_DATA_DIRS)
+    # 2. SOSD_DATA_DIR environment variable.
+    env_dir = os.environ.get("SOSD_DATA_DIR", "")
+    if env_dir:
+        dirs.append(env_dir)
+    # 3. Default: <repo_root>/data.
+    dirs.append(str(REPO_ROOT / "data"))
+    return dirs
+
 
 # ── YAML loading ─────────────────────────────────────────────────────────────
 def load_config(path: Path) -> Dict[str, Any]:
@@ -126,12 +143,21 @@ def build_cmd(case: Dict[str, Any]) -> List[str]:
     # Dataset argument.
     ds = case.get("dataset", "")
     if ds and not ds.startswith("synth_"):
-        # Real dataset file.
-        ds_path = REPO_ROOT / "data" / ds
-        if ds_path.exists():
-            cmd += ["--dataset", str(ds_path)]
-        else:
-            print(f"  [WARN] dataset not found: {ds_path}; using synthetic", file=sys.stderr)
+        found = False
+        # 1. Absolute path — use as-is.
+        if os.path.isabs(ds) and Path(ds).exists():
+            cmd += ["--dataset", ds]
+            found = True
+        # 2. Look up under each data directory search path.
+        for search_dir in get_data_dirs():
+            candidate = Path(search_dir) / ds
+            if candidate.exists():
+                cmd += ["--dataset", str(candidate)]
+                found = True
+                break
+        if not found:
+            print(f"  [WARN] dataset not found: {ds}; using synthetic uniform",
+                  file=sys.stderr)
             cmd += ["--dist", "uniform"]
     else:
         # Synthetic.
@@ -285,6 +311,8 @@ def main():
     ap.add_argument("--jobs",    type=int, default=os.cpu_count() or 4)
     ap.add_argument("--filter-scenario", help="Only run this scenario")
     ap.add_argument("--filter-pla",      help="Only run this PLA algo")
+    ap.add_argument("--data-dir", action="append", default=[],
+                    help="Additional dataset search directory (repeatable)")
     ap.add_argument("--results-dir", help="Override results root directory (default: <repo>/results)")
     args = ap.parse_args()
 
@@ -301,6 +329,9 @@ def main():
         results_root = Path(args.results_dir)
         RESULTS_RAW = results_root / "raw"
         RESULTS_AGG = results_root / "agg"
+
+    # Populate data directory search path.
+    _DATA_DIRS.extend(args.data_dir)
 
     cfg   = load_config(Path(config_path))
     cases = expand_matrix(cfg, smoke=args.smoke)

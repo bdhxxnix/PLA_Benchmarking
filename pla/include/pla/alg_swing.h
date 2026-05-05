@@ -57,10 +57,10 @@ inline PlaResult build_swing(
     int64_t  seg_start_rank = 0;
 
     auto emit = [&](int64_t last_rank, uint64_t last_key,
-                    uint64_t next_key_lo) {
+                    uint64_t next_key_lo, bool is_final = false) {
         Segment s;
         s.key_lo    = x_pivot;
-        s.key_hi    = (next_key_lo == 0)
+        s.key_hi    = is_final
                         ? std::numeric_limits<uint64_t>::max()
                         : next_key_lo - 1;
         // Midpoint slope (FITing-Tree convention).
@@ -83,7 +83,7 @@ inline PlaResult build_swing(
             // if epsilon < |yi - y_pivot| we must emit.
             if (std::abs(yi - y_pivot) > epsilon) {
                 // emit current segment ending at i-1, reset.
-                emit(yi - 1, keys[i-1], xi);
+                emit(yi - 1, keys[i-1], xi, false);
                 x_pivot = xi; y_pivot = yi; seg_start_rank = yi;
                 slope_lo = -std::numeric_limits<double>::infinity();
                 slope_hi =  std::numeric_limits<double>::infinity();
@@ -100,7 +100,7 @@ inline PlaResult build_swing(
 
         if (merged_lo > merged_hi) {
             // Intersection empty → emit segment, reset with current point as new pivot.
-            emit(yi - 1, keys[i-1], xi);
+            emit(yi - 1, keys[i-1], xi, false);
             x_pivot = xi; y_pivot = yi; seg_start_rank = yi;
             slope_lo = -std::numeric_limits<double>::infinity();
             slope_hi =  std::numeric_limits<double>::infinity();
@@ -111,7 +111,7 @@ inline PlaResult build_swing(
     }
 
     // Emit final segment.
-    emit(static_cast<int64_t>(n) - 1, keys[n-1], 0 /* sentinel: next_key_lo unused */);
+    emit(static_cast<int64_t>(n) - 1, keys[n-1], 0, true);
 
     auto t1 = std::chrono::steady_clock::now();
     result.build_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();

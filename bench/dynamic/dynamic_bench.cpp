@@ -177,6 +177,9 @@ int main(int argc, char** argv) {
     size_t      sample_rate  = std::stoull(get_arg(argc, argv, "--sample-rate","100"));
     std::string exp_id       = get_arg(argc, argv, "--exp-id",        "dynamic");
     std::string dataset      = get_arg(argc, argv, "--dataset",       "");
+    if (threads > 1)
+        std::cerr << "[WARN] dynamic_bench: --threads=" << threads
+                  << " ignored; NaiveDynamic is single-threaded\n";
     (void)threads;
 
     // Workload drives insert_ratio when explicitly set.

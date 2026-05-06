@@ -100,7 +100,7 @@ while [[ $# -gt 0 ]]; do
         medium)
           N_KEYS=1000000;  QUERIES=1000000; N_KEYS_DYN=1000000 ;;
         full)
-          N_KEYS=0;        QUERIES=10000000; N_KEYS_DYN=5000000 ;;  # ondisk uses full; dynamic capped at 5M
+          N_KEYS=0;        QUERIES=10000000; N_KEYS_DYN=1000000 ;;  # ondisk uses full; dynamic capped at 1M (NaiveDynamic is O(n²) insert)
         *) echo "Unknown scale: $SCALE (use smoke|medium|full)"; exit 1 ;;
       esac
       shift 2 ;;
@@ -246,7 +246,7 @@ echo "=============================================="
 echo " Scale:       $SCALE"
 echo " Experiments: ${EXPS[*]}"
 echo " PLAs:        ${PLA_LIST[*]}"
-echo " N keys:      $N_KEYS"
+echo " N keys:      $N_KEYS  (dynamic: $N_KEYS_DYN)"
 echo " N queries:   $QUERIES"
 echo " Threads:     $THREADS"
 echo " Dataset:     $DATASET"
@@ -339,7 +339,7 @@ run_experiments() {
           local eid="DWA_${PLA}_e${eps}"
           run_cmd "$BUILD_DIR/dynamic_bench" \
             --algo "$PLA" --epsilon "$eps" --workload write_heavy \
-            --n "$N_KEYS" --dataset "$DATASET" --exp-id "$eid" \
+            --n "$N_KEYS_DYN" --dataset "$DATASET" --exp-id "$eid" \
             >> "$RESULTS_DIR/dynamic.jsonl"
           echo "    OK: $eid"
         done
@@ -352,7 +352,7 @@ run_experiments() {
             local eid="DWB_${PLA}_e${eps}_${wl}"
             run_cmd "$BUILD_DIR/dynamic_bench" \
               --algo "$PLA" --epsilon "$eps" --workload "$wl" \
-              --n "$N_KEYS" --dataset "$DATASET" --exp-id "$eid" \
+              --n "$N_KEYS_DYN" --dataset "$DATASET" --exp-id "$eid" \
               >> "$RESULTS_DIR/dynamic.jsonl"
             echo "    OK: $eid"
           done

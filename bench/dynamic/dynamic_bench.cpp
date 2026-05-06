@@ -52,13 +52,15 @@ static double vec_pct(std::vector<double> v, double p) {
 }
 
 // ─── Dataset loader ─────────────────────────────────────────────────────────
-static std::vector<uint64_t> load_binary(const std::string& path) {
+// max_keys=0 means read all; otherwise read at most max_keys entries.
+static std::vector<uint64_t> load_binary(const std::string& path, size_t max_keys = 0) {
     std::ifstream f(path, std::ios::binary | std::ios::ate);
     if (!f) { std::cerr << "Cannot open: " << path << "\n"; std::exit(1); }
     auto sz = f.tellg(); f.seekg(0);
     size_t n = sz / sizeof(uint64_t);
+    if (max_keys > 0 && max_keys < n) n = max_keys;
     std::vector<uint64_t> v(n);
-    f.read(reinterpret_cast<char*>(v.data()), sz);
+    f.read(reinterpret_cast<char*>(v.data()), n * sizeof(uint64_t));
     return v;
 }
 
@@ -202,15 +204,22 @@ int main(int argc, char** argv) {
     std::vector<uint64_t> init_keys;
 
     if (!dataset.empty()) {
-        auto all_keys = load_binary(dataset);
+        // Read at most n entries from disk — avoids loading 200M keys when --n 5M.
+        std::cerr << "[dynamic] Loading dataset (max " << n << " keys): " << dataset << "\n" << std::flush;
+        auto all_keys = load_binary(dataset, n);
+        std::cerr << "[dynamic] Sorting " << all_keys.size() << " keys...\n" << std::flush;
         std::sort(all_keys.begin(), all_keys.end());
         all_keys.erase(std::unique(all_keys.begin(), all_keys.end()), all_keys.end());
-        size_t n_total = all_keys.size();
-        n_initial = std::min(n_initial, n_total / 2);
+        size_t n_total = all_keys.size();  // actual after dedup (≤ n)
+        n_initial = std::min(n / 2, n_total);
         init_keys.assign(all_keys.begin(), all_keys.begin() + static_cast<long>(n_initial));
         insert_stream.assign(all_keys.begin() + static_cast<long>(n_initial), all_keys.end());
+        // Do NOT override n with n_total here — that was causing 200M ops when --n 5M was passed.
+        // n stays as the user-requested cap; n_total is just the dedup-reduced count.
         n = n_total;
         ds_label = dataset;
+        std::cerr << "[dynamic] n=" << n << " init=" << n_initial
+                  << " insert_stream=" << insert_stream.size() << "\n" << std::flush;
     } else {
         init_keys.resize(n_initial);
         for (auto& k : init_keys) k = rng();
@@ -239,8 +248,16 @@ int main(int argc, char** argv) {
 
     size_t ins_done = 0, look_done = 0;
     double total_lookup_ns = 0.0;
+    size_t report_interval = std::max(n_ops / 10, size_t(50000));
 
     for (size_t op = 0; op < n_ops; ++op) {
+        if (op > 0 && op % report_interval == 0) {
+            double pct    = 100.0 * op / n_ops;
+            double elapsed = Ms(Clock::now() - t0).count() / 1000.0;
+            std::cerr << "[dynamic] " << std::fixed << std::setprecision(1)
+                      << pct << "% op=" << op << "/" << n_ops
+                      << " ins=" << ins_done << " elapsed=" << elapsed << "s\n" << std::flush;
+        }
         uint64_t key;
         if (!insert_stream.empty() && ins_done < insert_stream.size())
             key = insert_stream[ins_done % insert_stream.size()];

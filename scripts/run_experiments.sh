@@ -28,11 +28,10 @@ RESULTS_DIR="$REPO/results/raw"
 
 SCALE="smoke"
 N_KEYS=100000
+N_KEYS_DYN=0        # 0 = follow N_KEYS; set explicitly to cap dynamic experiment key count
 QUERIES=100000
 
-# Dataset paths — overridden by --scale and --dataset / --dyn-dataset.
 DATASET="$REPO/data/sosd_fb_1M_sorted"
-DYN_DATASET="$REPO/data/sosd_fb_1M"
 STRIP_HEADER=true          # auto-strip SOSD header for on-disk use
 
 THREADS=1
@@ -82,7 +81,7 @@ prepare_ondisk_dataset() {
   if [[ "$v1" -gt "$v2" ]] && [[ "$v2" -gt 0 ]]; then
     echo "  [strip-header] Removing unsorted leading value from $(basename "$src")" >&2
     mkdir -p "$(dirname "$dst")"
-    dd if="$src" of="$dst" bs=8 skip=1 status=none 2>/dev/null
+    dd if="$src" of="$dst" bs=8M iflag=skip_bytes skip=8 status=none 2>/dev/null
     echo "$dst"
   else
     # Dataset is already sorted — use directly.
@@ -97,20 +96,20 @@ while [[ $# -gt 0 ]]; do
       SCALE="$2"
       case "$SCALE" in
         smoke)
-          N_KEYS=100000;   QUERIES=100000 ;;
+          N_KEYS=100000;   QUERIES=100000;  N_KEYS_DYN=100000 ;;
         medium)
-          N_KEYS=1000000;  QUERIES=1000000 ;;
+          N_KEYS=1000000;  QUERIES=1000000; N_KEYS_DYN=1000000 ;;
         full)
-          N_KEYS=0;        QUERIES=10000000 ;;  # 0 = auto-detect from dataset
+          N_KEYS=0;        QUERIES=10000000; N_KEYS_DYN=5000000 ;;  # ondisk uses full; dynamic capped at 5M
         *) echo "Unknown scale: $SCALE (use smoke|medium|full)"; exit 1 ;;
       esac
       shift 2 ;;
     --experiments) EXPERIMENTS="$2"; shift 2 ;;
     --plas)        PLAS="$2";        shift 2 ;;
     --n)           N_KEYS="$2";      shift 2 ;;
+    --dyn-n)       N_KEYS_DYN="$2";  shift 2 ;;
     --queries)     QUERIES="$2";     shift 2 ;;
     --dataset)     DATASET="$2";      shift 2 ;;
-    --dyn-dataset) DYN_DATASET="$2";   shift 2 ;;
     --no-strip)    STRIP_HEADER=false; shift ;;
     --threads)     THREADS="$2";     shift 2 ;;
     --output-dir)  RESULTS_DIR="$2"; shift 2 ;;
@@ -151,11 +150,10 @@ while [[ $# -gt 0 ]]; do
       echo "    full    auto-detect from dataset, 10M queries"
       echo ""
       echo "=== Dataset paths ==="
-      echo "  --dataset PATH     On-disk benchmark dataset"
-      echo "  --dyn-dataset PATH Dynamic benchmark dataset"
+      echo "  --dataset PATH     Dataset for all benchmarks (on-disk, dynamic, in-memory)"
       echo "  --no-strip         Don't auto-strip SOSD header for on-disk"
       echo ""
-      echo "  Defaults (smoke/medium): data/sosd_fb_1M(_sorted)"
+      echo "  Defaults (smoke/medium): data/sosd_fb_1M_sorted"
       echo "  For --scale full, point at real datasets:"
       echo "    --dataset ~/Projects/Datasets/SOSD/fb_200M_uint64"
       echo "    --dataset ~/Projects/Datasets/SOSD/osm_800M_uint64_unique"
@@ -190,23 +188,13 @@ while [[ $# -gt 0 ]]; do
       echo "  $0 --scale full --dataset ~/Projects/Datasets/SOSD/osm_800M_uint64_unique \\"
       echo "      --experiments OD-A,OD-B,OD-C --plas optimal"
       echo ""
-      echo "  # In-memory only — no header issue, use dataset directly"
-      echo "  $0 --scale full --dyn-dataset ~/Projects/Datasets/SOSD/fb_200M_uint64 \\"
+      echo "  # In-memory only"
+      echo "  $0 --scale full --dataset ~/Projects/Datasets/SOSD/fb_200M_uint64 \\"
       echo "      --experiments IM-A,IM-B,DW-A --n 200000000"
       exit 0 ;;
     *) echo "Unknown: $1 (use --help)"; exit 1 ;;
   esac
 done
-
-# ─── Resolve datasets for scale ─────────────────────────────────────────────────
-if [[ "$SCALE" == "full" ]] && [[ "$N_KEYS" -eq 0 ]]; then
-  N_KEYS=$(filesize_to_n "$DATASET")
-fi
-
-# ─── Prepare on-disk dataset (strip SOSD header if needed) ──────────────────────
-if $STRIP_HEADER && [[ -f "$DATASET" ]]; then
-  DATASET=$(prepare_ondisk_dataset "$DATASET" "$REPO/data/sosd_ondisk_$(basename "$DATASET")")
-fi
 
 # ─── Resolve experiment list ────────────────────────────────────────────────────
 ALL_EXPS=(IM-A IM-B DW-A DW-B OD-A OD-B OD-C OD-D OD-E OD-F)
@@ -262,14 +250,33 @@ echo " N keys:      $N_KEYS"
 echo " N queries:   $QUERIES"
 echo " Threads:     $THREADS"
 echo " Dataset:     $DATASET"
-echo " Dyn dataset: $DYN_DATASET"
-echo " Strip hdr:   $STRIP_HEADER"
 echo " Dry run:     $DRY_RUN"
 echo " Cold cache:  $COLD_CACHE"
 echo " Results:     $RESULTS_DIR"
 echo "=============================================="
 
 mkdir -p "$RESULTS_DIR"
+
+# ─── Resolve N_KEYS and prepare dataset (deferred until after header) ───────────
+if [[ "$SCALE" == "full" ]] && [[ "$N_KEYS" -eq 0 ]]; then
+  echo " Detecting dataset size..."
+  N_KEYS=$(filesize_to_n "$DATASET")
+  echo " N keys (auto): $N_KEYS"
+fi
+
+# N_KEYS_DYN: 0 means "follow N_KEYS" (for smoke/medium); explicit value caps dynamic runs.
+if [[ "$N_KEYS_DYN" -eq 0 ]]; then
+  N_KEYS_DYN="$N_KEYS"
+fi
+
+# Strip SOSD header only when an on-disk experiment is actually being run.
+if $STRIP_HEADER && printf '%s\n' "${EXPS[@]}" | grep -q '^OD-'; then
+  if [[ -f "$DATASET" ]]; then
+    echo " Preparing on-disk dataset..."
+    DATASET=$(prepare_ondisk_dataset "$DATASET" "$REPO/data/sosd_ondisk_$(basename "$DATASET")")
+    echo " On-disk dataset: $DATASET"
+  fi
+fi
 
 run_experiments() {
   local -n _exps="$1"
@@ -328,14 +335,11 @@ run_experiments() {
 
       # ── DW-A: Dynamic retrain cost ──────────────────────────────────────────
       DW-A)
-        local ds_flag=""
-        [[ -f "$DATASET" ]] && ds_flag="--dataset $DATASET"
-        [[ -z "$ds_flag" && -f "$DYN_DATASET" ]] && ds_flag="--dataset $DYN_DATASET"
         for eps in $EPS_DWA; do
           local eid="DWA_${PLA}_e${eps}"
           run_cmd "$BUILD_DIR/dynamic_bench" \
             --algo "$PLA" --epsilon "$eps" --workload write_heavy \
-            --n "$N_KEYS" $ds_flag --exp-id "$eid" \
+            --n "$N_KEYS" --dataset "$DATASET" --exp-id "$eid" \
             >> "$RESULTS_DIR/dynamic.jsonl"
           echo "    OK: $eid"
         done
@@ -343,15 +347,12 @@ run_experiments() {
 
       # ── DW-B: Dynamic workload sweep ────────────────────────────────────────
       DW-B)
-        local ds_flag=""
-        [[ -f "$DATASET" ]] && ds_flag="--dataset $DATASET"
-        [[ -z "$ds_flag" && -f "$DYN_DATASET" ]] && ds_flag="--dataset $DYN_DATASET"
         for eps in $EPS_DWB; do
           for wl in readonly balanced write_heavy; do
             local eid="DWB_${PLA}_e${eps}_${wl}"
             run_cmd "$BUILD_DIR/dynamic_bench" \
               --algo "$PLA" --epsilon "$eps" --workload "$wl" \
-              --n "$N_KEYS" $ds_flag --exp-id "$eid" \
+              --n "$N_KEYS" --dataset "$DATASET" --exp-id "$eid" \
               >> "$RESULTS_DIR/dynamic.jsonl"
             echo "    OK: $eid"
           done

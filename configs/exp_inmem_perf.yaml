@@ -1,0 +1,22 @@
+exp_name: exp_inmem_perf
+# In-memory performance analysis with hardware perf counters.
+# Focus: space-time tradeoff (seg_cnt vs ops_s/latency) for
+#        PGM-index and FITing-Tree separately, with cache/branch/instruction
+#        counters to explain performance differences.
+#
+# Covers IM-A (PLA-only) and IM-B (end-to-end lookup).
+
+matrix:
+  scenario:       [pla_only, inmem]
+  pla:            [optimal, swing, greedy]
+  epsilon:        [8, 16, 32, 64, 128, 256, 512, 1024]
+  threads:        [1]
+  dataset:        [synth_uniform_10M, synth_lognormal_10M]
+  workload:       [readonly]
+  fetch_strategy: [-1]
+  index:          [pgm-index, fiting-tree]
+
+n_keys:  10000000
+queries: 1000000
+
+extra_flags: {}

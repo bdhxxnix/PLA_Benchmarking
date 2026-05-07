@@ -28,6 +28,10 @@ Charts produced:
  22. hybrid workloads         (ondisk: ops_s / io_pages by workload, OD-F)
  23. retrain count            (ε vs retrain_count, DW-A)
  24. PLA build scaling        (threads vs build_ms for pla_only, IM-A)
+ 25. inmem space-time tradeoff (seg_cnt vs ops_s/p99, per routing)
+ 26. inmem perf counters       (ε vs cache_miss_rate/IPC/branch_miss, per routing)
+ 27. inmem perf scatter        (cache_miss vs ops_s, branch_miss vs p99)
+ 28. inmem instr-per-lookup    (seg_cnt vs instructions/lookup)
 
 Usage:
   python3 tools/viz/plots.py --input results/agg/results.csv --output results/agg
@@ -1117,6 +1121,229 @@ def plot_pla_build_scaling(rows: List[Dict], out_dir: Path):
     print(f"[plot] {out}")
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# In-Memory Space-Time Tradeoff & Perf-Counter Analysis
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _perf_rate(rows: List[Dict]) -> List[Dict]:
+    """Add derived perf-counter rates in-place."""
+    for r in rows:
+        instr = r.get("instructions", 0) or 1
+        queries = r.get("n_keys", 0) or 1
+        r["cache_miss_rate"] = (r.get("cache_misses", 0) or 0) / instr
+        r["ipc"] = instr / ((r.get("cycles", 0) or 0) or 1)
+        r["branch_miss_rate"] = ((r.get("branch_misses", 0) or 0) / instr) * 100.0
+        r["instr_per_lookup"] = instr / queries
+    return rows
+
+
+# ── Plot 25: Space-Time Tradeoff (inmem) ────────────────────────────────────
+def plot_inmem_spacetime(rows: List[Dict], out_dir: Path):
+    """seg_cnt vs ops_s and seg_cnt vs p99_ns — one subplot per routing.
+
+    Each line connects (seg_cnt, metric) points of one PLA across the epsilon
+    sweep.  This is the core Pareto-frontier view: fewer segments (left) +
+    higher throughput (up) = strictly better.
+    """
+    inmem = [r for r in rows if r["scenario"] == "inmem" and r["ops_s"] > 0]
+    if not inmem:
+        return
+
+    routings = sorted(set(r.get("routing", "") for r in inmem if r.get("routing")))
+    if not routings:
+        return
+
+    fig, axes = plt.subplots(2, len(routings), figsize=(7 * len(routings), 11),
+                             squeeze=False)
+    for col, routing in enumerate(routings):
+        rr = [r for r in inmem if r.get("routing") == routing]
+
+        # Top row: seg_cnt vs ops_s
+        ax = axes[0][col]
+        seen = _plot_grouped_lines(ax, rr, "seg_cnt", "ops_s",
+                                   group_keys=["pla"],
+                                   marker_fn=lambda i: "o")
+        ax.set_title(f"{routing}: seg_cnt vs Throughput")
+        ax.set_xlabel("Segment count")
+        ax.set_ylabel("Throughput (ops/s)")
+        ax.set_xscale("log")
+        if seen:
+            ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
+
+        # Bottom row: seg_cnt vs p99_ns
+        ax = axes[1][col]
+        seen = _plot_grouped_lines(ax, rr, "seg_cnt", "p99_ns",
+                                   group_keys=["pla"],
+                                   marker_fn=lambda i: "o")
+        ax.set_title(f"{routing}: seg_cnt vs p99 Latency")
+        ax.set_xlabel("Segment count")
+        ax.set_ylabel("p99 latency (ns)")
+        ax.set_xscale("log")
+        if seen:
+            ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    out = out_dir / "inmem_spacetime.png"
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+    print(f"[plot] {out}")
+
+
+# ── Plot 26: ε vs Perf Counters (inmem) ─────────────────────────────────────
+def plot_inmem_perfcounters(rows: List[Dict], out_dir: Path):
+    """ε vs cache_miss_rate, IPC, branch_miss_rate — one row per routing.
+
+    Shows how PLA choice affects microarchitectural behaviour as epsilon
+    (and thus segment count) changes.  Explains the WHY behind the space-time
+    tradeoff curves.
+    """
+    inmem = _perf_rate([r for r in rows if r["scenario"] == "inmem"
+                        and r.get("instructions", 0) > 0])
+    if not inmem:
+        return
+
+    routings = sorted(set(r.get("routing", "") for r in inmem if r.get("routing")))
+    if not routings:
+        return
+
+    metrics = [
+        ("cache_miss_rate", "Cache-miss rate\n(misses / instruction)"),
+        ("ipc",             "IPC\n(instructions / cycle)"),
+        ("branch_miss_rate","Branch-miss rate (%)\n(branch misses / instr × 100)"),
+    ]
+
+    fig, axes = plt.subplots(len(metrics), len(routings),
+                             figsize=(7 * len(routings), 5 * len(metrics)),
+                             squeeze=False)
+    for col, routing in enumerate(routings):
+        rr = [r for r in inmem if r.get("routing") == routing]
+        for row, (metric, ylabel) in enumerate(metrics):
+            ax = axes[row][col]
+            seen = _plot_grouped_lines(ax, rr, "epsilon", metric,
+                                       group_keys=["pla"],
+                                       marker_fn=lambda i: "o")
+            ax.set_title(f"{routing}: ε vs {ylabel.split(chr(10))[0]}")
+            ax.set_xlabel("ε (epsilon)")
+            ax.set_ylabel(ylabel)
+            if seen:
+                ax.legend(fontsize=7)
+            ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    out = out_dir / "inmem_perfcounters.png"
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+    print(f"[plot] {out}")
+
+
+# ── Plot 27: Perf Counters vs Performance (scatter) ─────────────────────────
+def plot_inmem_perf_scatter(rows: List[Dict], out_dir: Path):
+    """Scatter: cache_miss_rate vs ops_s, branch_miss_rate vs p99_ns.
+
+    Each point is one (pla, epsilon) combination.  Marker = routing.
+    Reveals correlation between microarchitectural counters and end-to-end
+    performance.
+    """
+    inmem = _perf_rate([r for r in rows if r["scenario"] == "inmem"
+                        and r.get("instructions", 0) > 0
+                        and r["ops_s"] > 0])
+    if not inmem:
+        return
+
+    routings = sorted(set(r.get("routing", "") for r in inmem if r.get("routing")))
+    routing_markers = {r: ["o", "s", "^", "D"][i]
+                       for i, r in enumerate(routings)}
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5.5))
+
+    # Left: cache_miss_rate vs ops_s
+    ax = axes[0]
+    for routing in routings:
+        rr = [r for r in inmem if r.get("routing") == routing]
+        for pla in PLA_COLORS:
+            pr = [r for r in rr if r["pla"] == pla]
+            pts = [(r["cache_miss_rate"], r["ops_s"]) for r in pr]
+            if pts:
+                xs, ys = zip(*sorted(pts))
+                ax.scatter(xs, ys, marker=routing_markers[routing],
+                          color=pla_color(pla), alpha=0.7, s=40,
+                          label=f"{pla} / {routing}")
+                # Connect with faint line to show ε sweep direction
+                ax.plot(xs, ys, color=pla_color(pla), alpha=0.25, linewidth=0.8)
+    ax.set_title("Cache-miss rate vs Throughput")
+    ax.set_xlabel("Cache-miss rate (misses / instruction)")
+    ax.set_ylabel("Throughput (ops/s)")
+    ax.legend(fontsize=6, ncol=2)
+    ax.grid(True, alpha=0.3)
+
+    # Right: branch_miss_rate vs p99_ns
+    ax = axes[1]
+    for routing in routings:
+        rr = [r for r in inmem if r.get("routing") == routing]
+        for pla in PLA_COLORS:
+            pr = [r for r in rr if r["pla"] == pla]
+            pts = [(r["branch_miss_rate"], r["p99_ns"]) for r in pr]
+            if pts:
+                xs, ys = zip(*sorted(pts))
+                ax.scatter(xs, ys, marker=routing_markers[routing],
+                          color=pla_color(pla), alpha=0.7, s=40,
+                          label=f"{pla} / {routing}")
+                ax.plot(xs, ys, color=pla_color(pla), alpha=0.25, linewidth=0.8)
+    ax.set_title("Branch-miss rate vs p99 Latency")
+    ax.set_xlabel("Branch-miss rate (%)")
+    ax.set_ylabel("p99 latency (ns)")
+    ax.legend(fontsize=6, ncol=2)
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    out = out_dir / "inmem_perf_scatter.png"
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+    print(f"[plot] {out}")
+
+
+# ── Plot 28: Instructions-per-lookup diagnostic ─────────────────────────────
+def plot_inmem_instr_per_lookup(rows: List[Dict], out_dir: Path):
+    """seg_cnt vs instructions-per-lookup, one subplot per routing.
+
+    Tests: does more segments → more instructions per lookup?  If the
+    routing layer absorbs segment count differences, this relationship
+    should be weak.
+    """
+    inmem = _perf_rate([r for r in rows if r["scenario"] == "inmem"
+                        and r.get("instructions", 0) > 0])
+    if not inmem:
+        return
+
+    routings = sorted(set(r.get("routing", "") for r in inmem if r.get("routing")))
+    if not routings:
+        return
+
+    fig, axes = plt.subplots(1, len(routings), figsize=(7 * len(routings), 5),
+                             squeeze=False)
+    for col, routing in enumerate(routings):
+        ax = axes[0][col]
+        rr = [r for r in inmem if r.get("routing") == routing]
+        seen = _plot_grouped_lines(ax, rr, "seg_cnt", "instr_per_lookup",
+                                   group_keys=["pla"],
+                                   marker_fn=lambda i: "o")
+        ax.set_title(f"{routing}: seg_cnt vs Instructions/Lookup")
+        ax.set_xlabel("Segment count")
+        ax.set_ylabel("Instructions per lookup")
+        ax.set_xscale("log")
+        if seen:
+            ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    out = out_dir / "inmem_instr_per_lookup.png"
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+    print(f"[plot] {out}")
+
+
 # ── main ──────────────────────────────────────────────────────────────────────
 def main():
     ap = argparse.ArgumentParser(description="Generate benchmark plots")
@@ -1172,6 +1399,10 @@ def main():
     plot_ondisk_workloads(rows, out_dir)
     plot_retrain_count(rows, out_dir)
     plot_pla_build_scaling(rows, out_dir)
+    plot_inmem_spacetime(rows, out_dir)
+    plot_inmem_perfcounters(rows, out_dir)
+    plot_inmem_perf_scatter(rows, out_dir)
+    plot_inmem_instr_per_lookup(rows, out_dir)
 
     print(f"\nAll plots saved to {out_dir}")
 

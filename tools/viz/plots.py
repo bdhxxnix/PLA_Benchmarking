@@ -16,6 +16,18 @@ Charts produced:
  10. retrain impact           (grouped by workload)
  11. ondisk Rp vs epsilon     (canonical slice)
  12. page-align benefit       (canonical slice)
+ 13. RSS memory               (ε vs rss_mb, 2×2 facet by scenario)
+ 14. index size               (ε vs bytes_index, 2×2 facet by scenario)
+ 15. G4 compress effect       (ondisk: compress on/off vs ops_s + bytes)
+ 16. dynamic throughput       (ε vs ops_s by workload, DW-B)
+ 17. slope / intercept std    (ε vs slope_std / intercept_std, IM-A)
+ 18. microarch IPC + branches (ε vs ipc / branch_miss_rate, IM-B)
+ 19. granularity item vs page (ondisk: ε vs io_pages / ops_s, OD-D)
+ 20. fetch × threads          (ondisk: fetch_strategy vs ops_s faceted by threads, OD-C)
+ 21. target Rp iso-Rp         (target_rp vs ε / seg_cnt, OD-A)
+ 22. hybrid workloads         (ondisk: ops_s / io_pages by workload, OD-F)
+ 23. retrain count            (ε vs retrain_count, DW-A)
+ 24. PLA build scaling        (threads vs build_ms for pla_only, IM-A)
 
 Usage:
   python3 tools/viz/plots.py --input results/agg/results.csv --output results/agg
@@ -54,6 +66,7 @@ NUMERIC_COLS = {
     "retrain_p50_ms", "retrain_p95_ms", "retrain_window_p99_ns",
     "target_rp",
     "io_pages_mean", "io_pages_p50", "io_pages_p95", "io_pages_p99",
+    "bytes_compressed",
 }
 
 def load_csv(path: Path) -> List[Dict[str, Any]]:
@@ -86,12 +99,35 @@ def group_by(rows: List[Dict], key: str) -> Dict[str, List[Dict]]:
     return dict(g)
 
 
-def dataset_label(r: Dict) -> str:
-    """Short readable dataset label: 'uniform_100K', 'sosd_fb_200M', etc."""
+# Set by main() after loading data — controls whether dataset names appear in legends
+_SINGLE_DATASET = False
+
+
+def _norm_dataset(r: Dict) -> str:
+    """Extract a short, stable dataset stem regardless of path prefix."""
     ds = str(r.get("dataset", ""))
     ds = ds.split("/")[-1] if "/" in ds else ds
-    if not ds:
-        ds = "unknown"
+    # Strip known prefixes that vary by clone location
+    for pfx in ("sosd_ondisk_", "sosd_", "synth_"):
+        if ds.startswith(pfx):
+            ds = ds[len(pfx):]
+    # Strip known verbose suffixes
+    for suffix in ("_uint64", "_uint32", "_sorted", "_200M", "_1M", "_100K"):
+        if ds.endswith(suffix):
+            ds = ds[:-len(suffix)]
+    return ds or "unknown"
+
+
+def dataset_label(r: Dict) -> str:
+    """Short readable dataset label.
+
+    When all rows share the same dataset the label is empty so legends show
+    only the PLA name.  Otherwise it includes a short dataset stem + key count.
+    """
+    if _SINGLE_DATASET:
+        return ""
+
+    ds = _norm_dataset(r)
     nk = r.get("n_keys", 0) or 0
     if nk >= 1_000_000_000:
         nkl = f"{nk/1_000_000_000:.0f}B"
@@ -117,7 +153,9 @@ def _plot_grouped_lines(ax, rows, x_key, y_key, *, group_keys,
                         filter_fn=None, marker_fn=None, color_fn=None):
     """Generic: plot y vs x, one line per unique combination of group_keys.
 
-    Lines are labelled "{pla} / {dataset}" so the legend stays readable.
+    Duplicate x-values within a group are averaged so lines stay smooth when
+    multiple workloads / routings / configs share the same nominal x (e.g. same
+    epsilon but different workloads).
     """
     if filter_fn:
         rows = [r for r in rows if filter_fn(r)]
@@ -127,11 +165,18 @@ def _plot_grouped_lines(ax, rows, x_key, y_key, *, group_keys,
     for r in rows:
         parts = [str(r.get(k, "")) for k in group_keys]
         label = " / ".join(p for p in parts if p)
+        if not label:
+            label = str(r.get("pla", ""))
         groups[label].append(r)
 
     seen_any = False
     for idx, (label, prows) in enumerate(sorted(groups.items())):
-        pts = sorted((r[x_key], r[y_key]) for r in prows if r[y_key] > 0)
+        # Average y-values at each x to avoid jagged vertical scatter
+        x_buckets: Dict[float, List[float]] = defaultdict(list)
+        for r in prows:
+            if r[y_key] > 0:
+                x_buckets[float(r[x_key])].append(r[y_key])
+        pts = sorted((x, sum(vals) / len(vals)) for x, vals in x_buckets.items())
         if not pts:
             continue
         xs, ys = zip(*pts)
@@ -145,6 +190,14 @@ def _plot_grouped_lines(ax, rows, x_key, y_key, *, group_keys,
         ax.plot(xs, ys, **kwargs)
         seen_any = True
     return seen_any
+
+
+def _hide_unused_subplots(axes, used_count: int):
+    """Hide subplot axes beyond *used_count* so empty panels don't waste space."""
+    flat = axes.flat if hasattr(axes, "flat") else [axes]
+    for i, ax in enumerate(flat):
+        if i >= used_count:
+            ax.set_visible(False)
 
 
 # ── Plot 1: ε vs seg_cnt ─────────────────────────────────────────────────────
@@ -614,6 +667,456 @@ def plot_page_align_benefit(rows: List[Dict], out_dir: Path):
     print(f"[plot] {out}")
 
 
+# ── Plot 13: RSS memory across scenarios ────────────────────────────────────
+def plot_rss(rows: List[Dict], out_dir: Path):
+    """ε vs rss_mb, facet only by scenarios that have RSS data."""
+    scenarios = ["pla_only", "inmem", "dynamic", "ondisk"]
+    active = [(s, [r for r in rows if r["scenario"] == s and r.get("rss_mb", 0) > 0])
+              for s in scenarios]
+    active = [(s, sr) for s, sr in active if sr]
+    if not active:
+        return
+    n = len(active)
+    ncols = min(2, n)
+    nrows = (n + ncols - 1) // ncols
+    fig, axes = plt.subplots(nrows, ncols, figsize=(7 * ncols, 5.5 * nrows),
+                             squeeze=False)
+    for idx, (scenario, sr) in enumerate(active):
+        ax = axes[idx // ncols][idx % ncols]
+        seen = _plot_grouped_lines(ax, sr, "epsilon", "rss_mb",
+                                   group_keys=["pla", dataset_label])
+        ax.set_title(f"{scenario}: ε vs RSS")
+        ax.set_xlabel("ε (epsilon)")
+        ax.set_ylabel("RSS (MB)")
+        if seen:
+            ax.legend(fontsize=7, ncol=1)
+        ax.grid(True, alpha=0.3)
+    _hide_unused_subplots(axes, n)
+    plt.tight_layout()
+    out = out_dir / "rss.png"
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+    print(f"[plot] {out}")
+
+
+# ── Plot 14: Index size across scenarios ────────────────────────────────────
+def plot_bytes_index(rows: List[Dict], out_dir: Path):
+    """ε vs bytes_index, facet only by scenarios that have data."""
+    scenarios = ["pla_only", "inmem", "dynamic", "ondisk"]
+    active = [(s, [r for r in rows if r["scenario"] == s and r.get("bytes_index", 0) > 0])
+              for s in scenarios]
+    active = [(s, sr) for s, sr in active if sr]
+    if not active:
+        return
+    n = len(active)
+    ncols = min(2, n)
+    nrows = (n + ncols - 1) // ncols
+    fig, axes = plt.subplots(nrows, ncols, figsize=(7 * ncols, 5.5 * nrows),
+                             squeeze=False)
+    for idx, (scenario, sr) in enumerate(active):
+        ax = axes[idx // ncols][idx % ncols]
+        seen = _plot_grouped_lines(ax, sr, "epsilon", "bytes_index",
+                                   group_keys=["pla", dataset_label])
+        ax.set_title(f"{scenario}: ε vs Index Size")
+        ax.set_xlabel("ε (epsilon)")
+        ax.set_ylabel("Index size (bytes)")
+        ax.set_yscale("log")
+        if seen:
+            ax.legend(fontsize=7, ncol=1)
+        ax.grid(True, alpha=0.3)
+    _hide_unused_subplots(axes, n)
+    plt.tight_layout()
+    out = out_dir / "bytes_index.png"
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+    print(f"[plot] {out}")
+
+
+# ── Plot 15: G4 compress effect (ondisk) ────────────────────────────────────
+def _bool_val(r: Dict, key: str) -> bool:
+    v = str(r.get(key, "")).lower()
+    return v in ("true", "1")
+
+
+def plot_ondisk_compress(rows: List[Dict], out_dir: Path):
+    """OD-B: compress on/off comparison — ops_s and bytes_index."""
+    ondisk = [r for r in rows if r["scenario"] == "ondisk"]
+    has_compress = any(_bool_val(r, "compress") for r in ondisk)
+    if not has_compress:
+        return
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5.5))
+    for ax, metric, ylabel in zip(axes,
+                                   ["ops_s", "bytes_index"],
+                                   ["Throughput (ops/s)", "Index size (bytes)"]):
+        seen_any = False
+        for pla in PLA_COLORS:
+            for comp_flag, comp_label, ls in [("false", "uncompressed", "-"),
+                                               ("true", "compressed", "--")]:
+                prows = [r for r in ondisk
+                         if r["pla"] == pla and _bool_val(r, "compress") == (comp_flag == "true")]
+                # Use bytes_compressed for compressed size when available
+                if comp_flag == "true" and metric == "bytes_index":
+                    pts = sorted((r["epsilon"], r.get("bytes_compressed", 0) or r["bytes_index"])
+                                 for r in prows if (r.get("bytes_compressed", 0) or r["bytes_index"]) > 0)
+                else:
+                    pts = sorted((r["epsilon"], r[metric]) for r in prows if r[metric] > 0)
+                if pts:
+                    xs, ys = zip(*pts)
+                    ax.plot(xs, ys, linestyle=ls, marker="o", color=pla_color(pla),
+                            label=f"{pla} {comp_label}", markersize=5)
+                    seen_any = True
+        ax.set_title(f"OD-B: ε vs {ylabel} (compress on/off)")
+        ax.set_xlabel("ε (epsilon)")
+        ax.set_ylabel(ylabel)
+        if seen_any:
+            ax.legend(fontsize=7)
+        ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    out = out_dir / "ondisk_compress.png"
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+    print(f"[plot] {out}")
+
+
+# ── Plot 16: Dynamic throughput by workload (DW-B) ──────────────────────────
+def plot_dynamic_throughput(rows: List[Dict], out_dir: Path):
+    """DW-B: ε vs ops_s for dynamic, grouped by (pla, workload)."""
+    dynamic = [r for r in rows
+               if r["scenario"] == "dynamic" and r["ops_s"] > 0]
+    if not dynamic:
+        return
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    seen_any = False
+    for wl in sorted(set(r.get("workload", "") for r in dynamic)):
+        wr = [r for r in dynamic if r.get("workload") == wl]
+        for pla in PLA_COLORS:
+            prows = [r for r in wr if r["pla"] == pla]
+            eps_groups: Dict[int, List[float]] = defaultdict(list)
+            for r in prows:
+                eps_groups[int(r["epsilon"])].append(r["ops_s"])
+            pts = sorted((eps, sum(vals) / len(vals)) for eps, vals in eps_groups.items())
+            if pts:
+                xs, ys = zip(*pts)
+                ax.plot(xs, ys, marker="o", color=pla_color(pla),
+                        label=f"{pla} / {wl}", markersize=5, linewidth=1.2)
+                seen_any = True
+    ax.set_title("DW-B: ε vs Throughput by Workload")
+    ax.set_xlabel("ε (epsilon)")
+    ax.set_ylabel("Throughput (ops/s)")
+    if seen_any:
+        ax.legend(fontsize=7, ncol=2)
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    out = out_dir / "dynamic_throughput.png"
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+    print(f"[plot] {out}")
+
+
+# ── Plot 17: Slope / intercept std (IM-A) ───────────────────────────────────
+def plot_slope_intercept(rows: List[Dict], out_dir: Path):
+    """IM-A: ε vs slope_std and intercept_std for pla_only, single-thread."""
+    pla_only = [r for r in rows
+                if r["scenario"] == "pla_only"
+                and r.get("threads", 1) == 1.0]
+    if not pla_only:
+        return
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5.5))
+    for ax, metric, ylabel in zip(axes,
+                                   ["slope_std", "intercept_std"],
+                                   ["Slope std", "Intercept std"]):
+        seen = _plot_grouped_lines(ax, pla_only, "epsilon", metric,
+                                   group_keys=["pla", dataset_label],
+                                   filter_fn=lambda r: float(r.get(metric, 0)) > 0)
+        ax.set_title(f"IM-A: ε vs {ylabel}")
+        ax.set_xlabel("ε (epsilon)")
+        ax.set_ylabel(ylabel)
+        if seen:
+            ax.legend(fontsize=6, ncol=2)
+        ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    out = out_dir / "slope_intercept.png"
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+    print(f"[plot] {out}")
+
+
+# ── Plot 18: Microarch — IPC + branch miss rate (IM-B) ──────────────────────
+def plot_microarch(rows: List[Dict], out_dir: Path):
+    """IM-B: ε vs IPC and branch_miss_rate for inmem, canonical slice."""
+    inmem = [r for r in rows
+             if r["scenario"] == "inmem"
+             and r.get("threads", 1) == 1.0
+             and r.get("ipc", 0) > 0]
+    if not inmem:
+        return
+
+    # Compute branch miss rate on the fly
+    for r in inmem:
+        branches = r.get("branches", 0)
+        r["branch_miss_rate"] = (r.get("branch_misses", 0) / branches * 100.0) if branches else 0.0
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5.5))
+    for ax, metric, ylabel in zip(axes,
+                                   ["ipc", "branch_miss_rate"],
+                                   ["IPC (instructions/cycle)", "Branch miss rate (%)"]):
+        seen_any = False
+        for pla in PLA_COLORS:
+            eps_groups: Dict[int, List[float]] = defaultdict(list)
+            for r in inmem:
+                if r["pla"] == pla and float(r.get(metric, 0)) > 0:
+                    eps_groups[int(r["epsilon"])].append(float(r[metric]))
+            pts = sorted((eps, sum(vals) / len(vals)) for eps, vals in eps_groups.items())
+            if pts:
+                xs, ys = zip(*pts)
+                ax.plot(xs, ys, marker="o", color=pla_color(pla),
+                        label=pla, markersize=5, linewidth=1.5)
+                seen_any = True
+        ax.set_title(f"IM-B: ε vs {ylabel}")
+        ax.set_xlabel("ε (epsilon)")
+        ax.set_ylabel(ylabel)
+        if seen_any:
+            ax.legend(fontsize=7)
+        ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    out = out_dir / "microarch.png"
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+    print(f"[plot] {out}")
+
+
+# ── Plot 19: Granularity item vs page (OD-D) ────────────────────────────────
+def plot_ondisk_granularity(rows: List[Dict], out_dir: Path):
+    """OD-D: item vs page granularity comparison for ondisk."""
+    ondisk = [r for r in rows
+              if r["scenario"] == "ondisk"
+              and r.get("granularity")
+              and str(r.get("page_align", "")).lower() in ("false", "0", "")
+              and r.get("fetch_strategy", 0) == 1.0
+              and r.get("workload", "readonly") == "readonly"]
+    if not ondisk:
+        return
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5.5))
+    for ax, metric, ylabel in zip(axes,
+                                   ["io_pages_mean", "ops_s"],
+                                   ["Mean pages/query", "Throughput (ops/s)"]):
+        seen_any = False
+        for gran, gran_label, ls in [("item", "item", "-"), ("page", "page", "--")]:
+            gr = [r for r in ondisk if r.get("granularity") == gran]
+            for pla in PLA_COLORS:
+                prows = [r for r in gr if r["pla"] == pla]
+                pts = sorted((r["epsilon"], r[metric]) for r in prows if r[metric] > 0)
+                if pts:
+                    xs, ys = zip(*pts)
+                    ax.plot(xs, ys, linestyle=ls, marker="s", color=pla_color(pla),
+                            label=f"{pla} {gran_label}", markersize=5)
+                    seen_any = True
+        ax.set_title(f"OD-D: ε vs {ylabel} (item vs page)")
+        ax.set_xlabel("ε (epsilon)")
+        ax.set_ylabel(ylabel)
+        if seen_any:
+            ax.legend(fontsize=7)
+        ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    out = out_dir / "ondisk_granularity.png"
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+    print(f"[plot] {out}")
+
+
+# ── Plot 20: Fetch strategy × threads (OD-C) ────────────────────────────────
+def plot_ondisk_fetch_threads(rows: List[Dict], out_dir: Path):
+    """OD-C: fetch_strategy vs ops_s, faceted by thread count."""
+    ondisk = [r for r in rows
+              if r["scenario"] == "ondisk"
+              and r.get("granularity", "item") == "item"
+              and str(r.get("page_align", "")).lower() in ("false", "0", "")
+              and r.get("workload", "readonly") == "readonly"
+              and r.get("fetch_strategy", -1) >= 0
+              and r["ops_s"] > 0]
+    if not ondisk:
+        return
+
+    thread_vals = sorted(set(int(r.get("threads", 1)) for r in ondisk))
+    n_threads = len(thread_vals)
+    if n_threads <= 1:
+        return  # single-thread only — plot 6 already covers this
+
+    ncols = min(3, n_threads)
+    nrows = (n_threads + ncols - 1) // ncols
+    fig, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 4.5 * nrows),
+                             squeeze=False)
+    for idx, threads in enumerate(thread_vals):
+        ax = axes[idx // ncols][idx % ncols]
+        tr = [r for r in ondisk if int(r.get("threads", 1)) == threads]
+        seen_any = False
+        for pla in PLA_COLORS:
+            prows = [r for r in tr if r["pla"] == pla]
+            pts = sorted((r["fetch_strategy"], r["ops_s"]) for r in prows if r["ops_s"] > 0)
+            if pts:
+                xs, ys = zip(*pts)
+                ax.plot(xs, ys, marker="o", color=pla_color(pla),
+                        label=pla, markersize=5)
+                seen_any = True
+        ax.set_title(f"threads={threads}: fetch_strategy vs ops/s")
+        ax.set_xlabel("fetch_strategy")
+        ax.set_ylabel("ops/s")
+        if seen_any:
+            ax.legend(fontsize=7)
+        ax.grid(True, alpha=0.3)
+    # Hide unused subplots
+    for idx in range(n_threads, nrows * ncols):
+        axes[idx // ncols][idx % ncols].set_visible(False)
+    plt.tight_layout()
+    out = out_dir / "ondisk_fetch_threads.png"
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+    print(f"[plot] {out}")
+
+
+# ── Plot 21: Target Rp iso-Rp analysis (OD-A) ───────────────────────────────
+def plot_target_rp(rows: List[Dict], out_dir: Path):
+    """OD-A iso-Rp: target_rp vs epsilon and seg_cnt per PLA."""
+    ondisk = [r for r in rows
+              if r["scenario"] == "ondisk"
+              and r.get("target_rp", 0) > 0]
+    if not ondisk:
+        return
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5.5))
+    for ax, metric, ylabel in zip(axes,
+                                   ["epsilon", "seg_cnt"],
+                                   ["ε needed", "Segment count"]):
+        seen = _plot_grouped_lines(ax, ondisk, "target_rp", metric,
+                                   group_keys=["pla", dataset_label])
+        ax.set_title(f"OD-A iso-Rp: target Rp vs {ylabel}")
+        ax.set_xlabel("target_rp (target pages/query)")
+        ax.set_ylabel(ylabel)
+        if seen:
+            ax.legend(fontsize=6, ncol=2)
+        ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    out = out_dir / "target_rp.png"
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+    print(f"[plot] {out}")
+
+
+# ── Plot 22: Hybrid workloads (OD-F) ─────────────────────────────────────────
+def plot_ondisk_workloads(rows: List[Dict], out_dir: Path):
+    """OD-F: ondisk workload comparison — ops_s and io_pages_mean per PLA."""
+    ondisk = [r for r in rows
+              if r["scenario"] == "ondisk"
+              and r.get("workload") in ("readonly", "insert", "hybrid")
+              and r.get("granularity", "item") == "item"
+              and str(r.get("page_align", "")).lower() in ("false", "0", "")]
+    if not ondisk:
+        return
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5.5))
+    for ax, metric, ylabel in zip(axes,
+                                   ["ops_s", "io_pages_mean"],
+                                   ["Throughput (ops/s)", "Mean pages/query"]):
+        seen_any = False
+        for wl in sorted(set(r.get("workload", "") for r in ondisk)):
+            wr = [r for r in ondisk if r.get("workload") == wl]
+            for pla in PLA_COLORS:
+                prows = [r for r in wr if r["pla"] == pla]
+                pts = sorted((r["epsilon"], r[metric]) for r in prows if r[metric] > 0)
+                if pts:
+                    xs, ys = zip(*pts)
+                    ax.plot(xs, ys, marker="o", color=pla_color(pla),
+                            label=f"{pla} / {wl}", markersize=5, linewidth=1.2)
+                    seen_any = True
+        ax.set_title(f"OD-F: ε vs {ylabel} by Workload")
+        ax.set_xlabel("ε (epsilon)")
+        ax.set_ylabel(ylabel)
+        if seen_any:
+            ax.legend(fontsize=6, ncol=2)
+        ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    out = out_dir / "ondisk_workloads.png"
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+    print(f"[plot] {out}")
+
+
+# ── Plot 23: Retrain count (DW-A) ────────────────────────────────────────────
+def plot_retrain_count(rows: List[Dict], out_dir: Path):
+    """DW-A: ε vs retrain_count for dynamic, grouped by (pla, workload)."""
+    dynamic = [r for r in rows
+               if r["scenario"] == "dynamic"
+               and r.get("retrain_count", 0) > 0]
+    if not dynamic:
+        return
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    seen_any = False
+    for wl in sorted(set(r.get("workload", "") for r in dynamic)):
+        wr = [r for r in dynamic if r.get("workload") == wl]
+        for pla in PLA_COLORS:
+            prows = [r for r in wr if r["pla"] == pla]
+            eps_groups: Dict[int, List[float]] = defaultdict(list)
+            for r in prows:
+                eps_groups[int(r["epsilon"])].append(r["retrain_count"])
+            pts = sorted((eps, sum(vals) / len(vals)) for eps, vals in eps_groups.items())
+            if pts:
+                xs, ys = zip(*pts)
+                ax.plot(xs, ys, marker="s", color=pla_color(pla),
+                        label=f"{pla} / {wl}", markersize=5, linewidth=1.2)
+                seen_any = True
+    ax.set_title("DW-A: ε vs Retrain Count by Workload")
+    ax.set_xlabel("ε (epsilon)")
+    ax.set_ylabel("Retrain count")
+    if seen_any:
+        ax.legend(fontsize=7, ncol=2)
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    out = out_dir / "retrain_count.png"
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+    print(f"[plot] {out}")
+
+
+# ── Plot 24: PLA build scaling (threads vs build_ms) ────────────────────────
+def plot_pla_build_scaling(rows: List[Dict], out_dir: Path):
+    """IM-A: threads vs build_ms for pla_only, canonical epsilon."""
+    pla_only = [r for r in rows
+                if r["scenario"] == "pla_only"
+                and r["build_ms"] > 0]
+    if not pla_only:
+        return
+
+    # Pick the epsilon value with the most data
+    eps_counts: Dict[int, int] = defaultdict(int)
+    for r in pla_only:
+        eps_counts[int(r["epsilon"])] += 1
+    best_eps = max(eps_counts, key=eps_counts.get) if eps_counts else None
+    if best_eps is None:
+        return
+
+    sr = [r for r in pla_only if int(r["epsilon"]) == best_eps]
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    seen = _plot_grouped_lines(ax, sr, "threads", "build_ms",
+                               group_keys=["pla", dataset_label])
+    ax.set_title(f"IM-A: threads vs Build Time (ε={best_eps})")
+    ax.set_xlabel("Threads")
+    ax.set_ylabel("Build time (ms)")
+    if seen:
+        ax.legend(fontsize=7, ncol=2)
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    out = out_dir / "pla_build_scaling.png"
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+    print(f"[plot] {out}")
+
+
 # ── main ──────────────────────────────────────────────────────────────────────
 def main():
     ap = argparse.ArgumentParser(description="Generate benchmark plots")
@@ -636,6 +1139,15 @@ def main():
     rows = load_csv(csv_path)
     print(f"Loaded {len(rows)} rows from {csv_path}")
 
+    # Detect single-dataset mode — when all rows share the same dataset we
+    # drop the dataset name from legend labels for much cleaner output.
+    global _SINGLE_DATASET
+    datasets = {_norm_dataset(r) for r in rows}
+    _SINGLE_DATASET = len(datasets) <= 1
+    if _SINGLE_DATASET:
+        ds_name = next(iter(datasets)) if datasets else "unknown"
+        print(f"Single-dataset mode: \"{ds_name}\" — dataset names omitted from legends")
+
     plot_epsilon_seg_cnt(rows, out_dir)
     plot_epsilon_build_ms(rows, out_dir)
     plot_threads_throughput(rows, out_dir)
@@ -648,6 +1160,18 @@ def main():
     plot_retrain_impact(rows, out_dir)
     plot_ondisk_rp(rows, out_dir)
     plot_page_align_benefit(rows, out_dir)
+    plot_rss(rows, out_dir)
+    plot_bytes_index(rows, out_dir)
+    plot_ondisk_compress(rows, out_dir)
+    plot_dynamic_throughput(rows, out_dir)
+    plot_slope_intercept(rows, out_dir)
+    plot_microarch(rows, out_dir)
+    plot_ondisk_granularity(rows, out_dir)
+    plot_ondisk_fetch_threads(rows, out_dir)
+    plot_target_rp(rows, out_dir)
+    plot_ondisk_workloads(rows, out_dir)
+    plot_retrain_count(rows, out_dir)
+    plot_pla_build_scaling(rows, out_dir)
 
     print(f"\nAll plots saved to {out_dir}")
 

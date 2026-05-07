@@ -52,9 +52,7 @@ PGM-index 与 FITing-Tree 的差异，核心就在“如何组织并索引这些
 
 并行构建时，如果你沿用 PGM-index 常见的“把 key 切成连续块并行分段，再拼接结果”的策略，它会破坏 OptimalPLA 的全局最优性；PLABench 明确讨论了这一点，并指出额外线段数与线程数存在上界关系，这在你做“并行构建”实验前必须先验证并记录。 
 
-baselines: ALEX LIPP RMI 
 
-long tail latency 
 
 ### 实验 IM-B：端到端 iso-ε（同 ε、同 last-mile 搜索策略）
 

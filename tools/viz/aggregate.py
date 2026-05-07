@@ -72,6 +72,8 @@ COLUMNS = [
     # OD-A..F page-level metrics
     "granularity", "page_align", "target_rp",
     "io_pages_mean", "io_pages_p50", "io_pages_p95", "io_pages_p99",
+    # G4 compression / direct I/O flags
+    "compress", "bytes_compressed", "direct_io",
 ]
 
 

@@ -12,7 +12,7 @@ learned index structures, covering in-memory, dynamic, and on-disk scenarios.
 | `dynamic` | LOFT | wrapped microbench |
 | `ondisk` | Efficient-Disk-Learned-Index | `PGMIndexPage` |
 
-Three PLA algorithms are selectable at compile time (`-DPLA_ALGO=`):
+Three PLA algorithms are selectable at **runtime** via the `--algo` flag (no rebuild needed):
 
 | Algorithm | Space | Pivot | Source |
 |---|---|---|---|
@@ -52,7 +52,7 @@ pla-learned-index-bench/
 │   ├── bootstrap_ubuntu22.sh
 │   ├── apply_patches.sh
 │   ├── drop_caches.sh
-│   ├── perf_stat.sh
+│   ├── run_inmem_perf.sh   # full PLA×ε×routing sweep with perf counters
 │   └── datasets/           # gen_synth.py, split_shards.py
 ├── configs/
 │   └── exp_example.yaml
@@ -74,35 +74,38 @@ git submodule update --remote --recursive
 # 3. Apply adapter patches
 bash scripts/apply_patches.sh
 
-# 4. Build (OptimalPLA by default)
+# 4. Build (all three PLA algorithms compiled in; select at runtime with --algo)
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
 
 # 5. Run unit tests
 cd build && ctest --output-on-failure && cd ..
 
-# 6. Smoke run (tiny data, fast)
-python3 tools/runner/run.py --config configs/exp_example.yaml --smoke
+# 6. Quick smoke test (synthetic data, fast)
+./build/pla_build_bench --algo optimal --epsilon 64 --dist uniform --n 1000000
 
-# 7. View results
-ls results/raw/*.jsonl
+# 7. In-memory perf sweep (all PLAs, epsilons, routings)
+bash scripts/run_inmem_perf.sh
+
+# 8. Aggregate and plot
+python3 tools/viz/aggregate.py --input results/raw --output results/agg
+python3 tools/viz/plots.py --input results/agg/results.csv --output results/agg
 ls results/agg/*.png
 ```
 
-## Switching PLA algorithm
+## PLA selection
+
+All three algorithms are compiled into every binary — no rebuild required.
+Select at runtime with `--algo`:
 
 ```bash
-# Rebuild with SwingFilter
-cmake -S . -B build -DPLA_ALGO=swing
-cmake --build build -j$(nproc)
-
-# Rebuild with GreedyPLA
-cmake -S . -B build -DPLA_ALGO=greedy
-cmake --build build -j$(nproc)
+./build/pla_build_bench --algo optimal --epsilon 64 --dist uniform --n 1000000
+./build/pla_build_bench --algo swing   --epsilon 64 --dist uniform --n 1000000
+./build/pla_build_bench --algo greedy  --epsilon 64 --dist uniform --n 1000000
 ```
 
-The runner (`run.py`) handles this automatically — it rebuilds once per PLA
-algorithm before running the corresponding cases.
+The `-DPLA_ALGO` cmake flag only sets the default when `--algo` is omitted;
+the runner and benchmark scripts always pass `--algo` explicitly.
 
 ## Running experiments
 
@@ -129,7 +132,7 @@ python3 tools/runner/run.py configs/exp_example.yaml --no-build
 
 The runner handles the full lifecycle per run:
 1. Reads the YAML config and expands the Cartesian product of the matrix
-2. Groups cases by PLA algorithm, rebuilds CMake once per unique PLA value
+2. Builds the project once (all PLAs compiled in; selected at runtime via `--algo`)
 3. Executes each benchmark binary, appends JSONL to `results/raw/<scenario>.jsonl`
 4. Writes `results/agg/metadata.json` with git revision and platform info
 5. Auto-invokes `aggregate.py` and `plots.py`
@@ -151,6 +154,7 @@ The runner handles the full lifecycle per run:
 | `exp_ODE.yaml` | ondisk | G3 page-alignment (on/off) |
 | `exp_ODF.yaml` | ondisk | Update workload under hybrid framework (readonly/insert/hybrid) |
 | `fb_experiment.yaml` | pla_only, inmem | Real-data config using SOSD Facebook 200M |
+| `exp_inmem_perf.yaml` | pla_only, inmem | In-memory perf-counter sweep (all PLAs, ε=8..1024, 2 dists) |
 
 ## Generating datasets
 
@@ -237,18 +241,17 @@ cmake --build build -j$(nproc)
 
 All four benchmarks collect Linux `perf_event_open` counters directly (cache-misses,
 instructions, cycles, branch-misses) and report them in JSONL output. No external
-profiling tool needed.
+profiling tool needed — counters appear automatically on Linux.
 
 ```bash
-# Built-in: counters appear automatically in JSONL output
-./build/pla_build_bench --epsilon 64 --dataset data/sosd_fb_1M --n 1000000
+./build/pla_build_bench --algo optimal --epsilon 64 --dist uniform --n 1000000
 # → "cache_misses":263214,"instructions":477122454,"cycles":107785023,...
+```
 
-# External perf stat wrapper (averages over 3 runs)
-bash scripts/perf_stat.sh \
-    --cmd "build/lookup_bench --algo optimal --epsilon 64 --n 1000000" \
-    --exp-id lookup_optimal_e64
-# Results appended to results/raw/perf.jsonl
+For a comprehensive in-memory sweep with perf counters:
+```bash
+bash scripts/run_inmem_perf.sh
+# → results/raw/inmem_perf.jsonl (144 rows: 3 PLAs × 8 ε × 2 dists × 3 scenario/routing)
 ```
 
 Peak memory (RSS delta) is also reported as `rss_mb` in every benchmark's JSONL output.
@@ -297,20 +300,21 @@ Optional fields per scenario:
 
 Aggregation: `python3 tools/viz/aggregate.py` → `results/agg/results.csv`
 
-Plots: `python3 tools/viz/plots.py` → 6 PNG charts in `results/agg/`
+Plots: `python3 tools/viz/plots.py` → 28 PNG charts in `results/agg/`
+
+Analysis: `analysis.md` — comprehensive experiment analysis with perf-counter evidence
 
 ## Pipeline diagram
 
 ```mermaid
 flowchart TD
     A[configs yaml] --> B[runner expand matrix]
-    B --> C[build cmake PLA_ALGO]
-    C --> D[run bench binary]
+    B --> C[cmake build once]
+    C --> D[run bench binary --algo X]
     D --> E[results/raw JSONL]
     E --> F[aggregate.py → results.csv]
-    F --> G[plots.py → PNG charts]
-    D --> H[perf_stat.sh → perf.jsonl]
-    H --> F
+    F --> G[plots.py → 28 PNG charts]
+    G --> H[analysis.md]
 ```
 
 ## Reproducibility

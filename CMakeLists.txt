@@ -59,9 +59,16 @@ endif()
 
 # ─── URCU ────────────────────────────────────────────────────────────────────
 if(USE_URCU)
-  find_library(URCU_LIB urcu REQUIRED)
-  find_library(URCU_CDS_LIB urcu-cds REQUIRED)
-  message(STATUS "urcu: ${URCU_LIB}, urcu-cds: ${URCU_CDS_LIB}")
+  # Search conda prefix as well as system paths
+  find_library(URCU_LIB urcu
+    HINTS "$ENV{HOME}/anaconda3/lib" "$ENV{HOME}/miniconda3/lib")
+  find_library(URCU_CDS_LIB urcu-cds
+    HINTS "$ENV{HOME}/anaconda3/lib" "$ENV{HOME}/miniconda3/lib")
+  find_library(URCU_QSBR_LIB urcu-qsbr
+    HINTS "$ENV{HOME}/anaconda3/lib" "$ENV{HOME}/miniconda3/lib")
+  find_path(URCU_INCLUDE_DIR urcu.h
+    HINTS "$ENV{HOME}/anaconda3/include" "$ENV{HOME}/miniconda3/include")
+  message(STATUS "urcu: ${URCU_LIB}, urcu-cds: ${URCU_CDS_LIB}, urcu-qsbr: ${URCU_QSBR_LIB}")
 endif()
 
 # ─── Third-party include paths ───────────────────────────────────────────────
@@ -93,7 +100,10 @@ target_link_libraries(pla_build_bench PRIVATE pla_lib Threads::Threads)
 # 2. In-memory lookup benchmark
 add_executable(lookup_bench bench/inmem/lookup_bench.cpp)
 target_link_libraries(lookup_bench PRIVATE pla_lib Threads::Threads)
-target_include_directories(lookup_bench PRIVATE "${SOSD_INCLUDE}")
+target_include_directories(lookup_bench PRIVATE
+  "${SOSD_INCLUDE}"
+  "${CMAKE_SOURCE_DIR}/third_party/FITing-Tree/lib/stx-btree-0.9/include"
+)
 
 # 3. LOFT dynamic benchmark wrapper
 if(BUILD_DYNAMIC)
@@ -102,13 +112,17 @@ if(BUILD_DYNAMIC)
     "${LOFT_INCLUDE}"
     "${CMAKE_SOURCE_DIR}/pla/include"
     "${PGM_INCLUDE}"
+    "$ENV{HOME}/anaconda3/include"  # jemalloc (LOFT header requires it)
+    "${CMAKE_SOURCE_DIR}/build/stubs"  # MKL stub
   )
   target_link_libraries(dynamic_bench PRIVATE pla_lib Threads::Threads)
   if(USE_JEMALLOC)
     target_link_libraries(dynamic_bench PRIVATE ${JEMALLOC_LIB})
   endif()
   if(USE_URCU)
-    target_link_libraries(dynamic_bench PRIVATE ${URCU_LIB} ${URCU_CDS_LIB})
+    target_include_directories(dynamic_bench PRIVATE "${URCU_INCLUDE_DIR}")
+    target_link_directories(dynamic_bench PRIVATE "$ENV{HOME}/anaconda3/lib")
+    target_link_libraries(dynamic_bench PRIVATE ${URCU_LIB} ${URCU_CDS_LIB} ${URCU_QSBR_LIB})
   endif()
   if(USE_MKL AND MKL_FOUND)
     target_link_libraries(dynamic_bench PRIVATE MKL::MKL)

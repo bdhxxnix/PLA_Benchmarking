@@ -47,6 +47,9 @@
 #include "perf_counters.h"
 #include "rss.h"
 
+// EDLI real PGM-index-disk (runtime epsilon, page-oriented learned index)
+#include <pgm_index_page.hpp>
+
 using Clock = std::chrono::steady_clock;
 using Ns    = std::chrono::duration<double, std::nano>;
 using Ms    = std::chrono::duration<double, std::milli>;
@@ -274,6 +277,40 @@ struct DeltaBuffer {
     bool needs_merge() const { return buf.size() >= MAX_BUF; }
 };
 
+// ─── EDLI PGM-index-disk wrapper (real third-party) ─────────────────────────
+// Wraps pgm_page::PGMIndexPage<K> which accepts RUNTIME epsilon in the
+// constructor — no compile-time template parameter needed.  The EDLI index
+// produces item-position search ranges; our I/O emulation layer (DiskFile,
+// DirectIOFile, fetch strategies) is used unchanged for page-level I/O.
+struct EdliPgmIndex {
+    pgm_page::PGMIndexPage<uint64_t> idx;
+    size_t n_keys = 0;
+    int64_t epsilon = 128;
+
+    void build(const uint64_t* keys, size_t n, int64_t eps) {
+        epsilon = eps;
+        n_keys  = n;
+        std::vector<std::pair<uint64_t, size_t>> data(n);
+        for (size_t i = 0; i < n; ++i)
+            data[i] = {keys[i], i};
+        idx = pgm_page::PGMIndexPage<uint64_t>(data.begin(), data.end(),
+                                                static_cast<size_t>(eps));
+    }
+
+    pla::SearchRange search_range(uint64_t key) const {
+        auto r = idx.search(key);
+        return {static_cast<int64_t>(r.lo),
+                static_cast<int64_t>(std::min(r.hi, n_keys))};
+    }
+
+    size_t seg_cnt()      const { return idx.segments_count(); }
+    size_t bytes()        const { return idx.size_in_bytes(); }
+    int    levels()       const { return static_cast<int>(idx.height()); }
+    size_t seg_cnt_l1()   const {
+        return idx.segments_count() > 0 ? seg_cnt() - seg_cnt() : 0;
+    }
+};
+
 // ─── mean_rp helper: run a probe to estimate average pages/query ──────────────
 static double probe_rp(const pla::PlaResult& idx, const uint64_t* keys, size_t n,
                        size_t n_probe, int fetch_strategy, bool page_align,
@@ -310,6 +347,7 @@ int main(int argc, char** argv) {
     size_t      n_synth        = std::stoull(get_arg(argc, argv, "--n",        "1000000"));
     bool        compress       = has_flag(argc, argv, "--compress");
     bool        direct_io      = has_flag(argc, argv, "--direct-io");
+    std::string index_type     = get_arg(argc, argv, "--index",  "pla");
     (void)threads;
 
     // ── Load or generate keys ─────────────────────────────────────────────────
@@ -402,7 +440,7 @@ int main(int argc, char** argv) {
         epsilon = lo_eps; // use the found epsilon for the main benchmark run
     }
 
-    // ── Build PLA index ───────────────────────────────────────────────────────
+    // ── Build index ───────────────────────────────────────────────────────────
     size_t rss_before = get_rss_mb();
 
     PerfCounters perf;
@@ -413,8 +451,21 @@ int main(int argc, char** argv) {
     auto t_build0 = Clock::now();
     pla::PlaResult index;
     PageLevelIndex page_idx;
+    EdliPgmIndex   edli_idx;
+    bool           use_edli = (index_type == "pgm-page");
 
-    if (granularity == "page") {
+    if (use_edli) {
+        // Real EDLI PGM-index-disk (runtime epsilon)
+        if (granularity == "page") {
+            // G2 page granularity: scale epsilon to page units
+            int64_t eps_pages = std::max(int64_t(1),
+                epsilon * static_cast<int64_t>(KEY_BYTES) /
+                static_cast<int64_t>(PAGE_BYTES));
+            edli_idx.build(keys, n, eps_pages);
+        } else {
+            edli_idx.build(keys, n, epsilon);
+        }
+    } else if (granularity == "page") {
         // G2: page-level granularity — epsilon is in page units.
         page_idx.build(keys, n, epsilon, algo, opts);
         index = page_idx.pla; // for reporting seg_cnt / bytes
@@ -431,10 +482,16 @@ int main(int argc, char** argv) {
     int64_t hw_cycles = perf.cycles();
     int64_t hw_brmiss = perf.branch_misses();
 
-    // G4: compressed index size (float slope+intercept vs double = 48→40 bytes/segment).
-    size_t bytes_compressed = compress
-        ? index.segments.size() * (sizeof(pla::Segment) - 2 * sizeof(double) + 2 * sizeof(float))
-        : index.bytes();
+    // G4: compressed index size.
+    size_t bytes_compressed = 0;
+    if (use_edli) {
+        bytes_compressed = edli_idx.bytes();
+    } else if (compress) {
+        bytes_compressed = index.segments.size() *
+            (sizeof(pla::Segment) - 2 * sizeof(double) + 2 * sizeof(float));
+    } else {
+        bytes_compressed = index.bytes();
+    }
 
     // Drop page cache hints to simulate cold cache (best-effort without root).
     // posix_fadvise(DONTNEED) works on file-backed pages even without root,
@@ -496,12 +553,14 @@ int main(int argc, char** argv) {
         auto qt0 = Clock::now();
 
         pla::SearchRange range;
-        if (granularity == "page") {
+        if (use_edli) {
+            range = edli_idx.search_range(queries[q]);
+        } else if (granularity == "page") {
             range = page_idx.search_range_items(queries[q], n);
         } else {
             range = index.search_range(queries[q]);
         }
-        if (page_align && granularity != "page") {
+        if (page_align && !use_edli && granularity != "page") {
             range = page_align_range(range, n);
         }
 
@@ -561,11 +620,17 @@ int main(int argc, char** argv) {
                           io_pages_per_query.end(), 0.0)
           / static_cast<double>(io_pages_per_query.size());
 
+    size_t report_seg_cnt = use_edli ? edli_idx.seg_cnt()
+                                     : index.segments.size();
+    size_t report_bytes   = use_edli ? edli_idx.bytes()
+                                     : index.bytes();
+    std::string report_index = use_edli ? "PGM-Index-Page" : "PLA";
+
     std::cout << std::fixed << std::setprecision(3)
         << "{"
         << "\"exp_id\":\""         << exp_id         << "\","
         << "\"scenario\":\"ondisk\","
-        << "\"index\":\"PGM-Index-Page\","
+        << "\"index\":\""          << report_index   << "\","
         << "\"pla\":\""            << algo_s          << "\","
         << "\"epsilon\":"          << epsilon          << ","
         << "\"threads\":"          << 1               << ","
@@ -576,8 +641,8 @@ int main(int argc, char** argv) {
         << "\"fetch_strategy\":"   << fetch_strategy   << ","
         << "\"target_rp\":"        << target_rp        << ","
         << "\"build_ms\":"         << build_ms         << ","
-        << "\"seg_cnt\":"          << index.segments.size() << ","
-        << "\"bytes_index\":"      << index.bytes()         << ","
+        << "\"seg_cnt\":"          << report_seg_cnt   << ","
+        << "\"bytes_index\":"      << report_bytes     << ","
         << "\"compress\":"         << (compress ? "true" : "false") << ","
         << "\"bytes_compressed\":" << bytes_compressed     << ","
         << "\"direct_io\":"        << (direct_io ? "true" : "false") << ","

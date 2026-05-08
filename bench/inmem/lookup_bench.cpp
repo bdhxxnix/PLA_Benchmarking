@@ -126,19 +126,60 @@ static double percentile(std::vector<double>& v, double p) {
 
 // ─── Index types ─────────────────────────────────────────────────────────────
 
-// FITing-Tree style: flat segment array + O(log S) binary search for routing.
-// This is the "index_lower_bound" approach — equivalent to a sorted array of
-// segment breakpoints searched with std::upper_bound.
-struct FitingTreeIndex {
-    pla::PlaResult pla;
+// ─── Real FITing-Tree: stx::btree (B+-tree) routing over PLA segments ──────
+// Imports the real stx::btree from the FITing-Tree submodule to index segments.
+// This is the actual FITing-Tree design: PLA segments + B+-tree routing.
+// Uses std::greater<KeyType> comparator (descending order) — the convention in
+// the real FITing-Tree implementation.
 
-    void build(const std::vector<uint64_t>& keys, int64_t epsilon,
+#include <stx/btree.h>
+
+struct FitingTreeIndex {
+    // FITing-Tree's stx::btree instantiation (matches fiting_tree.h lines 52-59)
+    using BTree = stx::btree<uint64_t,            // key   = segment start key
+        std::pair<double, double>,                // data  = {slope, intercept}
+        std::pair<uint64_t, std::pair<double, double>>,
+        std::greater<uint64_t>,                   // descending key order
+        stx::btree_default_map_traits<uint64_t, std::pair<double, double>>,
+        false>;
+
+    BTree               routing_tree;
+    pla::PlaResult      pla;
+    int64_t             epsilon = 64;
+
+    void build(const std::vector<uint64_t>& keys, int64_t eps,
                pla::PlaAlgo algo, pla::PlaOptions opts) {
-        pla = pla::build_pla(keys, epsilon, algo, opts);
+        epsilon = eps;
+        pla     = pla::build_pla(keys, epsilon, algo, opts);
+
+        // Bulk-load segments into the B+-tree in descending key order
+        // (matching real FITing-Tree convention: reverse iteration)
+        std::vector<std::pair<uint64_t, std::pair<double, double>>> formatted;
+        formatted.reserve(pla.segments.size());
+        for (auto it = pla.segments.rbegin(); it != pla.segments.rend(); ++it) {
+            formatted.emplace_back(it->key_lo,
+                std::make_pair(it->slope, static_cast<double>(it->intercept)));
+        }
+        if (!formatted.empty())
+            routing_tree.bulk_load(formatted.begin(), formatted.end());
     }
 
     pla::SearchRange search_range(uint64_t key) const {
-        return pla.search_range(key);
+        const int64_t n_signed = static_cast<int64_t>(pla.n_keys);
+        if (routing_tree.empty()) return {0, n_signed};
+
+        // lower_bound with std::greater finds first segment with key_lo <= key
+        auto it = routing_tree.lower_bound(key);
+        if (it == routing_tree.end()) {
+            // key is before all segments (smaller than smallest key_lo)
+            return {0, std::min(n_signed, epsilon + 2)};
+        }
+
+        double slope     = it->second.first;
+        double intercept = it->second.second;
+        auto   pred      = static_cast<int64_t>(
+            slope * static_cast<double>(key - it->first) + intercept);
+        return pla::make_range(pred, epsilon, n_signed);
     }
 
     size_t bytes()       const { return pla.bytes(); }
@@ -149,79 +190,118 @@ struct FitingTreeIndex {
     size_t seg_cnt()     const { return pla.segments.size(); }
 };
 
-// PGM-index style: 2-level recursive PLA.
-// Level-1 narrows the binary search range in level-0 from O(log S) to O(log ε₁).
-// ε₁ is chosen as sqrt(S) to balance index size vs search speed.
+// ─── Real PGM-index: recursive multi-level PLA ──────────────────────────────
+// Builds levels recursively (epsilon for level-0, epsilon_recursive=4 for
+// upper levels) until the top level has ≤ 1 segment.  This matches the real
+// PGM-index algorithm in third_party/PGM-index.
+//
+// Key difference from our previous 2-level PgmStyleIndex:
+//   - Upper levels use a small fixed epsilon (4), not sqrt(S)
+//   - Builds as many levels as needed, not just 2
+//   - Segment routing traverses ALL levels top-down
+
 struct PgmStyleIndex {
-    pla::PlaResult level0;  // base PLA over original keys
-    pla::PlaResult level1;  // PLA over segment key_lo values
-    int64_t        eps0 = 0;
-    double         total_build_ms = 0;
+    static constexpr int64_t EPS_RECURSIVE = 4;  // matches PGM-index default
+
+    std::vector<pla::Segment> all_segments;       // all levels concatenated
+    std::vector<size_t>       levels_offsets;     // start index of each level
+    size_t                    n_keys  = 0;
+    int64_t                   eps0    = 0;
+    double                    build_ms_total = 0;
+    int                       num_levels = 0;
 
     void build(const std::vector<uint64_t>& keys, int64_t epsilon,
                pla::PlaAlgo algo, pla::PlaOptions opts) {
         eps0   = epsilon;
-        level0 = pla::build_pla(keys, epsilon, algo, opts);
-        total_build_ms = level0.build_ms;
+        n_keys = keys.size();
 
-        if (level0.segments.size() > 2) {
+        // ── Level 0: segments over original keys ──────────────────────────
+        pla::PlaResult l0 = pla::build_pla(keys, epsilon, algo, opts);
+        build_ms_total = l0.build_ms;
+        size_t seg_cnt = l0.segments.size();
+
+        all_segments.reserve(seg_cnt * 2);
+        levels_offsets.push_back(0);
+        for (auto& s : l0.segments)
+            all_segments.push_back(std::move(s));
+        levels_offsets.push_back(all_segments.size());
+
+        // ── Upper levels: segments over segment key_lo values ─────────────
+        // Uses EPS_RECURSIVE (4) for routing accuracy.
+        // Repeats until the level has ≤ 1 segment.
+        size_t prev_n = seg_cnt;
+        while (prev_n > 1) {
             std::vector<uint64_t> seg_keys;
-            seg_keys.reserve(level0.segments.size());
-            for (const auto& s : level0.segments)
-                seg_keys.push_back(s.key_lo);
+            seg_keys.reserve(prev_n);
+            size_t offset = levels_offsets[levels_offsets.size() - 2];
+            for (size_t i = offset; i < offset + prev_n; ++i)
+                seg_keys.push_back(all_segments[i].key_lo);
 
-            // ε₁ = sqrt(S): balances routing accuracy vs level-1 size.
-            int64_t eps1 = std::max(int64_t(4),
-                static_cast<int64_t>(std::sqrt(static_cast<double>(
-                    level0.segments.size()))));
-            level1 = pla::build_pla(seg_keys, eps1, algo, opts);
-            total_build_ms += level1.build_ms;
+            pla::PlaResult lvl = pla::build_pla(seg_keys, EPS_RECURSIVE, algo, opts);
+            build_ms_total += lvl.build_ms;
+            prev_n = lvl.segments.size();
+
+            for (auto& s : lvl.segments)
+                all_segments.push_back(std::move(s));
+            levels_offsets.push_back(all_segments.size());
         }
+
+        num_levels = static_cast<int>(levels_offsets.size()) - 1;
     }
 
     pla::SearchRange search_range(uint64_t key) const {
-        const int64_t n = static_cast<int64_t>(level0.n_keys);
-        const auto&   segs = level0.segments;
+        const int64_t n_signed = static_cast<int64_t>(n_keys);
+        if (all_segments.empty())
+            return {0, n_signed};
 
-        if (segs.empty()) return {0, n};
+        // ── Multi-level routing (top-down) ────────────────────────────────
+        // Start from the top-level segment
+        int64_t seg_idx = static_cast<int64_t>(
+            levels_offsets[levels_offsets.size() - 2]);
 
-        // Fall back to flat search if level-1 is empty (very small datasets).
-        if (level1.segments.empty()) {
-            return level0.search_range(key);
+        for (int lvl = num_levels - 2; lvl >= 0; --lvl) {
+            int64_t lvl_begin = static_cast<int64_t>(levels_offsets[lvl]);
+            int64_t lvl_end   = static_cast<int64_t>(levels_offsets[lvl + 1]) - 1;
+
+            const auto& seg  = all_segments[static_cast<size_t>(seg_idx)];
+            int64_t    pred  = static_cast<int64_t>(seg.predict_raw(key));
+            int64_t    lo    = std::max(lvl_begin, pred - EPS_RECURSIVE - 1);
+            int64_t    hi    = std::min(lvl_end,   pred + EPS_RECURSIVE + 2);
+
+            // Find rightmost segment with key_lo <= key within [lo, hi]
+            int64_t left = lo, right = hi;
+            while (left < right) {
+                int64_t mid = left + (right - left) / 2;
+                if (all_segments[static_cast<size_t>(mid)].key_lo <= key)
+                    left = mid + 1;
+                else
+                    right = mid;
+            }
+            seg_idx = std::max(lvl_begin, left - 1);
         }
 
-        // Step 1: level-1 predicts approximate segment index.
-        auto sr1   = level1.search_range(key);
-        int64_t lo = std::max(int64_t(0), sr1.lo);
-        int64_t hi = std::min(sr1.hi, static_cast<int64_t>(segs.size()));
-
-        // Step 2: narrow binary search within [lo, hi) for the segment.
-        // Find rightmost segment with key_lo <= key.
-        int64_t left = lo, right = hi;
-        while (left < right) {
-            int64_t mid = left + (right - left) / 2;
-            if (segs[static_cast<size_t>(mid)].key_lo <= key) left = mid + 1;
-            else right = mid;
+        // ── Last-mile: use the base-level segment for final prediction ────
+        if (seg_idx >= 0 &&
+            seg_idx < static_cast<int64_t>(levels_offsets[1])) {
+            const auto& seg  = all_segments[static_cast<size_t>(seg_idx)];
+            int64_t    pred  = static_cast<int64_t>(seg.predict_raw(key));
+            return pla::make_range(pred, eps0, n_signed);
         }
-        int64_t seg_idx = left - 1;
-
-        if (seg_idx < 0 || seg_idx >= static_cast<int64_t>(segs.size())) {
-            // Key is before the first segment.
-            return {0, std::min(n, eps0 + 2)};
-        }
-
-        // Step 3: predict position using found segment.
-        auto pred = static_cast<int64_t>(
-            segs[static_cast<size_t>(seg_idx)].predict_raw(key));
-        return pla::make_range(pred, eps0, n);
+        return {0, n_signed};
     }
 
-    size_t bytes()      const { return level0.bytes() + level1.bytes(); }
-    int    levels()     const { return level1.segments.empty() ? 1 : 2; }
-    size_t seg_cnt_l0() const { return level0.segments.size(); }
-    size_t seg_cnt_l1() const { return level1.segments.size(); }
-    double build_ms()   const { return total_build_ms; }
-    size_t seg_cnt()    const { return level0.segments.size(); }
+    size_t bytes()      const { return all_segments.size() * sizeof(pla::Segment); }
+    int    levels()     const { return num_levels; }
+    size_t seg_cnt_l0() const {
+        return levels_offsets.size() >= 2
+            ? levels_offsets[1] - levels_offsets[0] : 0;
+    }
+    size_t seg_cnt_l1() const {
+        // Total of all upper-level segments
+        return all_segments.size() - seg_cnt_l0();
+    }
+    double build_ms()   const { return build_ms_total; }
+    size_t seg_cnt()    const { return seg_cnt_l0(); }
 };
 
 // ─── main ─────────────────────────────────────────────────────────────────────
